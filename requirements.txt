@@ -1,0 +1,30 @@
+# FastAPI - 现代化的Web框架
+fastapi==0.115.6
+
+# Uvicorn - ASGI服务器
+uvicorn[standard]==0.34.0
+
+# Python-dotenv - 环境变量管理
+python-dotenv==1.0.1
+
+# Coze Python SDK - Coze API客户端
+cozepy==0.20.0
+
+# Pydantic - 数据验证
+pydantic==2.10.5
+
+# httpx - HTTP客户端（cozepy依赖）
+httpx==0.28.1
+
+# Requests - HTTP库（用于OAuth token获取）
+requests==2.32.3
+
+# PyJWT - JWT编码和解码
+PyJWT==2.10.1
+
+# cryptography - RSA加密支持（PyJWT依赖）
+cryptography==44.0.0
+
+# 其他可选依赖
+# aiofiles==24.1.0  # 异步文件操作
+# python-multipart==0.0.20  # 文件上传支持
