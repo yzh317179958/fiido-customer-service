@@ -13,6 +13,7 @@ Fiido智能客服后端服务
 
 import os
 import json
+import time
 from typing import Optional
 from contextlib import asynccontextmanager
 import uuid
@@ -30,6 +31,16 @@ import httpx
 
 # 导入 OAuth Token 管理器
 from src.oauth_token_manager import OAuthTokenManager
+
+# 导入 SessionState 和 Regulator 模块（P0 任务）
+from src.session_state import (
+    SessionState,
+    SessionStatus,
+    InMemorySessionStore,
+    Message,
+    EscalationInfo
+)
+from src.regulator import Regulator, RegulatorConfig
 
 # 加载环境变量
 load_dotenv()
@@ -74,6 +85,8 @@ class ConversationResponse(BaseModel):
 coze_client: Optional[Coze] = None
 token_manager: Optional[OAuthTokenManager] = None
 jwt_oauth_app: Optional[JWTOAuthApp] = None  # 用于 Chat SDK 的 JWTOAuthApp
+session_store: Optional[InMemorySessionStore] = None  # 会话状态存储（P0）
+regulator: Optional[Regulator] = None  # 监管策略引擎（P0）
 WORKFLOW_ID: str = ""
 APP_ID: str = ""  # AI 应用 ID（应用中嵌入对话流时必需）
 AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
@@ -87,7 +100,7 @@ conversation_cache: dict = {}  # {session_name: conversation_id}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global coze_client, token_manager, jwt_oauth_app, WORKFLOW_ID, APP_ID, AUTH_MODE
+    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, WORKFLOW_ID, APP_ID, AUTH_MODE
 
     # 读取配置
     WORKFLOW_ID = os.getenv("COZE_WORKFLOW_ID", "")
@@ -108,6 +121,23 @@ async def lifespan(app: FastAPI):
     print(f"📱 App ID: {APP_ID}")
     print(f"🔄 Workflow ID: {WORKFLOW_ID}")
     print(f"💬 多轮对话: 已启用")
+
+    # 初始化 SessionState 存储（P0）
+    try:
+        session_store = InMemorySessionStore()
+        print(f"✅ SessionState 存储初始化成功")
+    except Exception as e:
+        print(f"⚠️  SessionState 存储初始化失败: {str(e)}")
+
+    # 初始化 Regulator 监管引擎（P0）
+    try:
+        regulator_config = RegulatorConfig()
+        regulator = Regulator(regulator_config)
+        print(f"✅ Regulator 监管引擎初始化成功")
+        print(f"   关键词: {len(regulator_config.keywords)}个")
+        print(f"   失败阈值: {regulator_config.fail_threshold}")
+    except Exception as e:
+        print(f"⚠️  Regulator 初始化失败: {str(e)}")
 
     # OAuth+JWT 鉴权
     try:
@@ -515,6 +545,31 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # 获取会话标识（session_id），如果没有则生成
         session_id = request.user_id or generate_user_id()
 
+        # 【P0-3 前置处理】检查会话状态 - 如果正在人工接管，拒绝AI对话
+        if session_store and regulator:
+            try:
+                # 获取或创建会话状态
+                conversation_id_for_state = request.conversation_id or conversation_cache.get(session_id)
+                session_state = await session_store.get_or_create(
+                    session_name=session_id,
+                    conversation_id=conversation_id_for_state
+                )
+
+                # 如果正在人工接管中，返回 409 状态码
+                if session_state.status == SessionStatus.MANUAL_LIVE:
+                    print(f"⚠️  会话 {session_id} 正在人工接管中，拒绝AI对话")
+                    raise HTTPException(
+                        status_code=409,
+                        detail="MANUAL_IN_PROGRESS"
+                    )
+
+                print(f"📊 会话状态: {session_state.status.value}")
+            except HTTPException:
+                raise
+            except Exception as state_error:
+                # ⚠️ 状态检查失败不应影响核心对话功能
+                print(f"⚠️  状态检查异常（不影响对话）: {str(state_error)}")
+
         # 【会话隔离核心1】将 session_id 作为 session_name 传入 JWT
         access_token = token_manager.get_access_token(session_name=session_id)
         print(f"🔐 会话隔离: session_name={session_id}")
@@ -625,6 +680,71 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # 合并所有消息
         final_message = "".join(response_messages) if response_messages else ""
 
+        # 【P0-3 后置处理】更新会话状态和触发监管检查
+        if session_store and regulator and final_message:
+            try:
+                # 获取会话状态
+                conversation_id_for_update = returned_conversation_id or conversation_id
+                session_state = await session_store.get_or_create(
+                    session_name=session_id,
+                    conversation_id=conversation_id_for_update
+                )
+
+                # 添加用户消息到历史
+                user_message = Message(
+                    role="user",
+                    content=request.message
+                )
+                session_state.add_message(user_message)
+
+                # 添加AI响应到历史
+                ai_message = Message(
+                    role="assistant",
+                    content=final_message
+                )
+                session_state.add_message(ai_message)
+
+                # 触发监管引擎评估
+                regulator_result = regulator.evaluate(
+                    session=session_state,
+                    user_message=request.message,
+                    ai_response=final_message
+                )
+
+                # 如果需要升级到人工
+                if regulator_result.should_escalate:
+                    print(f"🚨 触发人工接管: {regulator_result.reason} - {regulator_result.details}")
+
+                    # 更新升级信息
+                    session_state.escalation = EscalationInfo(
+                        reason=regulator_result.reason,
+                        details=regulator_result.details,
+                        severity=regulator_result.severity
+                    )
+
+                    # 状态转换为 pending_manual
+                    session_state.transition_status(
+                        new_status=SessionStatus.PENDING_MANUAL
+                    )
+
+                    # 记录日志
+                    print(json.dumps({
+                        "event": "escalation_triggered",
+                        "session_name": session_id,
+                        "reason": regulator_result.reason,
+                        "severity": regulator_result.severity,
+                        "timestamp": int(time.time())
+                    }, ensure_ascii=False))
+
+                # 保存会话状态
+                await session_store.save(session_state)
+
+            except Exception as regulator_error:
+                # ⚠️ 监管逻辑失败不应影响核心对话功能
+                print(f"⚠️  监管处理异常（不影响对话）: {str(regulator_error)}")
+                import traceback
+                traceback.print_exc()
+
         return ChatResponse(
             success=True,
             message=final_message
@@ -676,6 +796,31 @@ async def chat_stream(request: ChatRequest):
         try:
             # 获取会话标识（session_id），如果没有则生成
             session_id = request.user_id or generate_user_id()
+
+            # 【P0-3 前置处理】检查会话状态 - 如果正在人工接管，拒绝AI对话
+            if session_store and regulator:
+                try:
+                    # 获取或创建会话状态
+                    conversation_id_for_state = request.conversation_id or conversation_cache.get(session_id)
+                    session_state = await session_store.get_or_create(
+                        session_name=session_id,
+                        conversation_id=conversation_id_for_state
+                    )
+
+                    # 如果正在人工接管中，发送错误事件
+                    if session_state.status == SessionStatus.MANUAL_LIVE:
+                        print(f"⚠️  流式会话 {session_id} 正在人工接管中，拒绝AI对话")
+                        error_data = {
+                            "type": "error",
+                            "content": "MANUAL_IN_PROGRESS"
+                        }
+                        yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                        return
+
+                    print(f"📊 流式会话状态: {session_state.status.value}")
+                except Exception as state_error:
+                    # ⚠️ 状态检查失败不应影响核心对话功能
+                    print(f"⚠️  流式状态检查异常（不影响对话）: {str(state_error)}")
 
             # 【会话隔离核心1】将 session_id 作为 session_name 传入 JWT
             access_token = token_manager.get_access_token(session_name=session_id)
@@ -747,6 +892,7 @@ async def chat_stream(request: ChatRequest):
                 # 处理 SSE 流
                 event_type = None
                 returned_conversation_id = None
+                full_ai_response = []  # 【P0-3】收集完整AI响应用于监管检查
 
                 for line in response.iter_lines():
                     if not line:
@@ -769,6 +915,7 @@ async def chat_stream(request: ChatRequest):
                                 if 'content' in data and data.get('role') == 'assistant':
                                     content = data['content']
                                     if content:
+                                        full_ai_response.append(content)  # 【P0-3】收集内容
                                         sse_data = {
                                             "type": "message",
                                             "content": content
@@ -793,6 +940,72 @@ async def chat_stream(request: ChatRequest):
             if not conversation_id and returned_conversation_id:
                 conversation_cache[session_id] = returned_conversation_id
                 print(f"✅ 流式接口保存新 conversation: {returned_conversation_id} (session: {session_id})")
+
+            # 【P0-3 后置处理】更新会话状态和触发监管检查
+            final_ai_message = "".join(full_ai_response)
+            if session_store and regulator and final_ai_message:
+                try:
+                    # 获取会话状态
+                    conversation_id_for_update = returned_conversation_id or conversation_id
+                    session_state = await session_store.get_or_create(
+                        session_name=session_id,
+                        conversation_id=conversation_id_for_update
+                    )
+
+                    # 添加用户消息到历史
+                    user_message = Message(
+                        role="user",
+                        content=request.message
+                    )
+                    session_state.add_message(user_message)
+
+                    # 添加AI响应到历史
+                    ai_message = Message(
+                        role="assistant",
+                        content=final_ai_message
+                    )
+                    session_state.add_message(ai_message)
+
+                    # 触发监管引擎评估
+                    regulator_result = regulator.evaluate(
+                        session=session_state,
+                        user_message=request.message,
+                        ai_response=final_ai_message
+                    )
+
+                    # 如果需要升级到人工
+                    if regulator_result.should_escalate:
+                        print(f"🚨 流式接口触发人工接管: {regulator_result.reason} - {regulator_result.details}")
+
+                        # 更新升级信息
+                        session_state.escalation = EscalationInfo(
+                            reason=regulator_result.reason,
+                            details=regulator_result.details,
+                            severity=regulator_result.severity
+                        )
+
+                        # 状态转换为 pending_manual
+                        session_state.transition_status(
+                            new_status=SessionStatus.PENDING_MANUAL
+                        )
+
+                        # 记录日志
+                        print(json.dumps({
+                            "event": "escalation_triggered",
+                            "session_name": session_id,
+                            "reason": regulator_result.reason,
+                            "severity": regulator_result.severity,
+                            "timestamp": int(time.time())
+                        }, ensure_ascii=False))
+
+                    # 保存会话状态
+                    await session_store.save(session_state)
+
+                except Exception as regulator_error:
+                    # ⚠️ 监管逻辑失败不应影响核心对话功能
+                    print(f"⚠️  流式监管处理异常（不影响对话）: {str(regulator_error)}")
+                    import traceback
+                    traceback.print_exc()
 
             # 发送完成事件
             yield f"data: {json.dumps({'type': 'done', 'content': ''}, ensure_ascii=False)}\n\n"
@@ -867,6 +1080,249 @@ async def get_fiido_icon():
         return FileResponse(icon_path, media_type="image/png")
     else:
         raise HTTPException(status_code=404, detail="Icon not found")
+
+
+# ==================== P0-4: 核心人工接管 API ====================
+
+@app.post("/api/manual/escalate")
+async def manual_escalate(request: dict):
+    """
+    人工升级接口
+    用户点击"人工客服"或监管触发后调用
+
+    Body: { "session_name": "session_123", "reason": "user_request" }
+    """
+    if not session_store or not regulator:
+        raise HTTPException(status_code=503, detail="SessionStore or Regulator not initialized")
+
+    session_name = request.get("session_name")
+    reason = request.get("reason", "user_request")
+
+    if not session_name:
+        raise HTTPException(status_code=400, detail="session_name is required")
+
+    try:
+        # 获取或创建会话状态
+        session_state = await session_store.get_or_create(
+            session_name=session_name,
+            conversation_id=conversation_cache.get(session_name)
+        )
+
+        # 检查是否已在人工接管中
+        if session_state.status == SessionStatus.MANUAL_LIVE:
+            raise HTTPException(status_code=409, detail="MANUAL_IN_PROGRESS")
+
+        # 更新升级信息
+        session_state.escalation = EscalationInfo(
+            reason=reason,
+            details=f"用户主动请求人工服务" if reason == "user_request" else f"触发原因: {reason}",
+            severity="high" if reason == "user_request" else "low"
+        )
+
+        # 状态转换为 pending_manual
+        session_state.transition_status(
+            new_status=SessionStatus.PENDING_MANUAL,
+            operator="user"
+        )
+
+        # 保存会话状态
+        await session_store.save(session_state)
+
+        # 记录日志
+        print(json.dumps({
+            "event": "manual_escalate",
+            "session_name": session_name,
+            "reason": reason,
+            "status": session_state.status.value,
+            "timestamp": int(time.time())
+        }, ensure_ascii=False))
+
+        return {
+            "success": True,
+            "data": session_state.to_dict()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 人工升级失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"升级失败: {str(e)}")
+
+
+@app.get("/api/sessions/{session_name}")
+async def get_session_state(session_name: str):
+    """
+    获取会话状态
+    前端刷新会话历史 & 状态
+    """
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+    try:
+        # 获取会话状态
+        session_state = await session_store.get(session_name)
+
+        if not session_state:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # 获取审计日志（如果实现了）
+        audit_trail = []  # TODO: 从独立存储获取
+
+        return {
+            "success": True,
+            "data": {
+                "session": session_state.to_dict(),
+                "audit_trail": audit_trail
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取会话状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@app.post("/api/manual/messages")
+async def manual_message(request: dict):
+    """
+    人工阶段消息写入
+    用于用户/坐席在人工接管期间的消息
+
+    Body: {
+        "session_name": "session_123",
+        "role": "agent" | "user",
+        "content": "我要人工"
+    }
+    """
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+    session_name = request.get("session_name")
+    role = request.get("role")
+    content = request.get("content")
+
+    if not all([session_name, role, content]):
+        raise HTTPException(status_code=400, detail="session_name, role, and content are required")
+
+    if role not in ["agent", "user"]:
+        raise HTTPException(status_code=400, detail="role must be 'agent' or 'user'")
+
+    try:
+        # 获取会话状态
+        session_state = await session_store.get(session_name)
+
+        if not session_state:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # 如果是用户消息，必须在manual_live状态
+        if role == "user" and session_state.status != SessionStatus.MANUAL_LIVE:
+            raise HTTPException(status_code=409, detail="Session not in manual_live status")
+
+        # 创建消息
+        message = Message(
+            role=role,
+            content=content,
+            agent_info=request.get("agent_info")  # 可选坐席信息
+        )
+
+        # 添加到历史
+        session_state.add_message(message)
+
+        # 保存会话状态
+        await session_store.save(session_state)
+
+        # 记录日志
+        print(json.dumps({
+            "event": "manual_message",
+            "session_name": session_name,
+            "role": role,
+            "message_id": message.id,
+            "timestamp": int(time.time())
+        }, ensure_ascii=False))
+
+        # TODO P0-5: 通过 SSE 推送消息 {"type":"manual_message",...}
+
+        return {
+            "success": True,
+            "data": {
+                "message_id": message.id,
+                "timestamp": message.timestamp
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 写入人工消息失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"写入失败: {str(e)}")
+
+
+@app.post("/api/sessions/{session_name}/release")
+async def release_session(session_name: str, request: dict):
+    """
+    结束人工接管，恢复AI
+
+    Body: { "agent_id": "agent_01", "reason": "resolved" }
+    """
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+    agent_id = request.get("agent_id")
+    reason = request.get("reason", "resolved")
+
+    try:
+        # 获取会话状态
+        session_state = await session_store.get(session_name)
+
+        if not session_state:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # 必须在manual_live状态才能释放
+        if session_state.status != SessionStatus.MANUAL_LIVE:
+            raise HTTPException(status_code=409, detail="Session not in manual_live status")
+
+        # 添加系统消息
+        system_message = Message(
+            role="system",
+            content="人工服务已结束，AI 助手已接管对话"
+        )
+        session_state.add_message(system_message)
+
+        # 记录结束时间
+        session_state.last_manual_end_at = time.time()
+
+        # 状态转换为 bot_active
+        session_state.transition_status(
+            new_status=SessionStatus.BOT_ACTIVE,
+            operator=agent_id or "system"
+        )
+
+        # 清除坐席信息
+        session_state.assigned_agent = None
+
+        # 保存会话状态
+        await session_store.save(session_state)
+
+        # 记录日志
+        print(json.dumps({
+            "event": "session_released",
+            "session_name": session_name,
+            "agent_id": agent_id,
+            "reason": reason,
+            "timestamp": int(time.time())
+        }, ensure_ascii=False))
+
+        return {
+            "success": True,
+            "data": session_state.to_dict()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 释放会话失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"释放失败: {str(e)}")
 
 
 if __name__ == "__main__":
