@@ -78,6 +78,11 @@ WORKFLOW_ID: str = ""
 APP_ID: str = ""  # AI 应用 ID（应用中嵌入对话流时必需）
 AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
 
+# Conversation 管理 - 存储每个 session_name 对应的 conversation_id
+# 实现原理: 首次不传 conversation_id,Coze 会自动生成并返回
+# 后续对话必须传入相同的 conversation_id 以保持上下文
+conversation_cache: dict = {}  # {session_name: conversation_id}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -208,29 +213,29 @@ def refresh_coze_client_if_needed():
 
 @app.get("/")
 async def root():
-    """根路径 - 返回前端页面 (Chat SDK 版本)"""
-    index_path = os.path.join(CURRENT_DIR, "index_chat_sdk.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    else:
-        # 如果找不到前端文件，返回 API 信息
-        return {
-            "service": "Fiido智能客服API",
-            "status": "running",
-            "version": "2.1.0",
-            "auth_mode": "OAUTH_JWT",
-            "frontend": "Coze Chat SDK",
-            "error": "前端文件 index_chat_sdk.html 未找到",
-            "endpoints": {
-                "chat": "/api/chat",
-                "chat_stream": "/api/chat/stream",
-                "health": "/api/health",
-                "config": "/api/config",
-                "token_info": "/api/token/info",
-                "sdk_token": "/api/token/sdk (NEW)",
-                "conversation_new": "/api/conversation/new (NEW)"
-            }
+    """根路径 - 返回 API 信息"""
+    return {
+        "service": "Fiido智能客服API",
+        "status": "running",
+        "version": "2.2.0",
+        "auth_mode": "OAUTH_JWT",
+        "frontend": "Vue 3 前端（frontend/ 目录）",
+        "frontend_url": "请访问 http://localhost:5173（需先启动 Vue 开发服务器）",
+        "endpoints": {
+            "chat": "/api/chat",
+            "chat_stream": "/api/chat/stream",
+            "health": "/api/health",
+            "config": "/api/config",
+            "bot_info": "/api/bot/info",
+            "token_info": "/api/token/info",
+            "conversation_new": "/api/conversation/new",
+            "conversation_clear": "/api/conversation/clear"
+        },
+        "docs": {
+            "swagger": "/docs",
+            "redoc": "/redoc"
         }
+    }
 
 
 @app.get("/index2.html")
@@ -301,7 +306,13 @@ async def create_new_conversation(request: dict):
     """
     创建新对话 (使用 Python SDK)
     保持 session_id 不变,但创建新的 conversation
+
+    【Coze API 约束】
+    - 严格遵守 PRD 12.1.1: 不手动生成 conversation_id，由 Coze 自动生成
+    - 必须传入 session_name 实现会话隔离
     """
+    global conversation_cache
+
     session_id = request.get("session_id")
 
     if not session_id:
@@ -314,7 +325,7 @@ async def create_new_conversation(request: dict):
         # 使用 JWTOAuthApp 生成带 session_name 的 token
         token_response = jwt_oauth_app.get_access_token(
             ttl=3600,
-            session_name=session_id  # 会话隔离
+            session_name=session_id  # 【Coze 约束】会话隔离关键
         )
 
         # 提取 access_token
@@ -326,8 +337,11 @@ async def create_new_conversation(request: dict):
             base_url=os.getenv("COZE_API_BASE", "https://api.coze.com")
         )
 
-        # 创建新 conversation
+        # 【Coze 约束】创建新 conversation（由 Coze 自动生成 ID）
         conversation = temp_coze.conversations.create()
+
+        # 更新缓存：保存新的 conversation_id
+        conversation_cache[session_id] = conversation.id
 
         print(f"✅ 新对话已创建: {conversation.id} (session: {session_id})")
 
@@ -337,6 +351,70 @@ async def create_new_conversation(request: dict):
         }
     except Exception as e:
         print(f"❌ 创建对话失败: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.post("/api/conversation/clear")
+async def clear_conversation_history(request: dict):
+    """
+    清除历史会话
+    实现方式：创建新的 conversation_id 并更新缓存
+
+    【Coze API 约束】
+    - 严格遵守 PRD 12.1.1: conversation_id 由 Coze 生成，不手动创建
+    - 清除历史 = 创建新会话，废弃旧 conversation_id
+    - 必须更新 session_name → conversation_id 映射关系
+    """
+    global conversation_cache
+
+    session_id = request.get("session_id")
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    if not jwt_oauth_app:
+        raise HTTPException(status_code=503, detail="JWTOAuthApp 未初始化")
+
+    try:
+        # 记录旧的 conversation_id（用于日志）
+        old_conversation_id = conversation_cache.get(session_id, "无")
+
+        # 使用 JWTOAuthApp 生成带 session_name 的 token
+        token_response = jwt_oauth_app.get_access_token(
+            ttl=3600,
+            session_name=session_id  # 【Coze 约束】会话隔离
+        )
+
+        # 提取 access_token
+        access_token = token_response.access_token if hasattr(token_response, 'access_token') else token_response
+
+        # 使用 Python SDK 创建 Coze 客户端
+        temp_coze = Coze(
+            auth=TokenAuth(token=access_token),
+            base_url=os.getenv("COZE_API_BASE", "https://api.coze.com")
+        )
+
+        # 【Coze 约束】创建新的 conversation（自动生成新 ID）
+        new_conversation = temp_coze.conversations.create()
+
+        # 更新缓存：用新 conversation_id 替换旧的
+        conversation_cache[session_id] = new_conversation.id
+
+        print(f"✅ 历史会话已清除")
+        print(f"   Session: {session_id}")
+        print(f"   旧 Conversation: {old_conversation_id}")
+        print(f"   新 Conversation: {new_conversation.id}")
+
+        return {
+            "success": True,
+            "conversation_id": new_conversation.id,
+            "message": "历史会话已清除，新对话已创建"
+        }
+    except Exception as e:
+        print(f"❌ 清除历史失败: {str(e)}")
         return {
             "success": False,
             "error": str(e)
@@ -385,41 +463,6 @@ async def get_token_info():
     return token_manager.get_token_info()
 
 
-@app.post("/api/token/sdk")
-async def get_sdk_token(request: dict):
-    """
-    为 Coze Chat SDK 生成 access_token
-    带 session_name 实现会话隔离
-    """
-    session_id = request.get("session_id")
-
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id is required")
-
-    if not jwt_oauth_app:
-        raise HTTPException(status_code=503, detail="JWTOAuthApp 未初始化")
-
-    try:
-        # 使用 Python SDK 生成带 session_name 的 token
-        token = jwt_oauth_app.get_access_token(
-            ttl=3600,
-            session_name=session_id  # ← 会话隔离
-        )
-
-        print(f"🔑 为 Chat SDK 生成 token (session: {session_id})")
-
-        return {
-            "success": True,
-            "token": token
-        }
-    except Exception as e:
-        print(f"❌ SDK token 生成失败: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-
 @app.post("/api/token/refresh")
 async def refresh_token():
     """手动刷新 token"""
@@ -455,8 +498,16 @@ async def refresh_token():
 async def chat(request: ChatRequest) -> ChatResponse:
     """
     同步聊天接口（使用 Coze Workflow Chat API）
-    通过 JWT session_name 实现会话隔离
+    通过 session_name + conversation_id 实现完整的会话隔离
+
+    实现原理(基于官方文档):
+    1. JWT 中传入 session_name (用户唯一标识)
+    2. 首次对话不传 conversation_id,系统自动生成
+    3. 后端存储 session_name 与 conversation_id 的映射
+    4. 后续对话传入相同的 conversation_id 以保持上下文
     """
+    global conversation_cache
+
     if coze_client is None:
         raise HTTPException(status_code=503, detail="Coze 客户端未初始化")
 
@@ -464,21 +515,32 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # 获取会话标识（session_id），如果没有则生成
         session_id = request.user_id or generate_user_id()
 
-        # 【会话隔离核心】将 session_id 作为 session_name 传入 JWT
-        # 根据官方文档，这样每个用户会有独立的会话
+        # 【会话隔离核心1】将 session_id 作为 session_name 传入 JWT
         access_token = token_manager.get_access_token(session_name=session_id)
         print(f"🔐 会话隔离: session_name={session_id}")
+
+        # 【会话隔离核心2】管理 conversation_id
+        # 检查是否已有该用户的 conversation_id
+        conversation_id = request.conversation_id
+
+        if not conversation_id:
+            # 检查缓存
+            conversation_id = conversation_cache.get(session_id)
+
+            if conversation_id:
+                print(f"♻️  使用缓存的 Conversation: {conversation_id}")
+            else:
+                print(f"🆕 首次对话,将自动生成 conversation_id")
 
         # 准备参数（Workflow Chat API 格式）
         api_base = os.getenv("COZE_API_BASE", "https://api.coze.com")
         url = f"{api_base}/v1/workflows/chat"
 
         # 构建请求体 - 添加 session_name 字段实现会话隔离
-        # 根据官方文档,必须在 payload 中添加 session_name 字段
         payload = {
             "workflow_id": WORKFLOW_ID,
             "app_id": APP_ID,
-            "session_name": session_id,  # 【关键】添加 session_name 字段
+            "session_name": session_id,  # 【关键1】session_name
             "parameters": {
                 "USER_INPUT": request.message,
             },
@@ -492,10 +554,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
             ]
         }
 
-        # 【新增】如果有 conversation_id,添加到 payload (用于保留历史对话)
-        if request.conversation_id:
-            payload["conversation_id"] = request.conversation_id
-            print(f"💬 使用已有 Conversation: {request.conversation_id}")
+        # 【关键2】如果有 conversation_id,添加到 payload
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+            print(f"💬 使用 Conversation: {conversation_id}")
 
         # 如果有额外参数，合并到 parameters
         if request.parameters:
@@ -524,8 +586,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     detail=f"Coze API 错误: {error_text}"
                 )
 
-            # 收集所有消息内容
+            # 收集所有消息内容和 conversation_id
             response_messages = []
+            returned_conversation_id = None
             event_type = None
 
             for line in response.iter_lines():
@@ -540,6 +603,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
                         data_str = line[5:].strip()
                         data = json.loads(data_str)
 
+                        # 提取 conversation_id (如果存在)
+                        if 'conversation_id' in data and not returned_conversation_id:
+                            returned_conversation_id = data['conversation_id']
+
                         # 处理消息增量事件
                         if event_type == 'conversation.message.delta':
                             if 'content' in data and data.get('role') == 'assistant':
@@ -549,6 +616,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
                     except json.JSONDecodeError:
                         pass
+
+        # 【关键3】如果是首次对话,保存自动生成的 conversation_id
+        if not conversation_id and returned_conversation_id:
+            conversation_cache[session_id] = returned_conversation_id
+            print(f"✅ 保存新 conversation: {returned_conversation_id} (session: {session_id})")
 
         # 合并所有消息
         final_message = "".join(response_messages) if response_messages else ""
@@ -586,8 +658,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
 async def chat_stream(request: ChatRequest):
     """
     流式聊天接口 - 使用 Coze Workflow Chat API
-    通过 JWT session_name 实现会话隔离
+    通过 session_name + conversation_id 实现完整的会话隔离
+
+    实现原理(基于官方文档):
+    1. JWT 中传入 session_name (用户唯一标识)
+    2. 首次对话不传 conversation_id,系统自动生成
+    3. 后端存储 session_name 与 conversation_id 的映射
+    4. 后续对话传入相同的 conversation_id 以保持上下文
     """
+    global conversation_cache
+
     if coze_client is None:
         raise HTTPException(status_code=503, detail="Coze 客户端未初始化")
 
@@ -597,20 +677,31 @@ async def chat_stream(request: ChatRequest):
             # 获取会话标识（session_id），如果没有则生成
             session_id = request.user_id or generate_user_id()
 
-            # 【会话隔离核心】将 session_id 作为 session_name 传入 JWT
+            # 【会话隔离核心1】将 session_id 作为 session_name 传入 JWT
             access_token = token_manager.get_access_token(session_name=session_id)
             print(f"🔐 流式会话隔离: session_name={session_id}")
+
+            # 【会话隔离核心2】管理 conversation_id
+            conversation_id = request.conversation_id
+
+            if not conversation_id:
+                # 检查缓存
+                conversation_id = conversation_cache.get(session_id)
+
+                if conversation_id:
+                    print(f"♻️  流式接口使用缓存的 Conversation: {conversation_id}")
+                else:
+                    print(f"🆕 流式接口首次对话,将自动生成 conversation_id")
 
             # 准备参数（Workflow Chat API 格式）
             api_base = os.getenv("COZE_API_BASE", "https://api.coze.com")
             url = f"{api_base}/v1/workflows/chat"
 
-            # 构建请求体 - 添加 session_name 字段实现会话隔离
-            # 根据官方文档,必须在 payload 中添加 session_name 字段
+            # 构建请求体
             payload = {
                 "workflow_id": WORKFLOW_ID,
                 "app_id": APP_ID,
-                "session_name": session_id,  # 【关键】添加 session_name 字段
+                "session_name": session_id,  # 【关键1】session_name
                 "parameters": {
                     "USER_INPUT": request.message,
                 },
@@ -624,10 +715,10 @@ async def chat_stream(request: ChatRequest):
                 ]
             }
 
-            # 【新增】如果有 conversation_id,添加到 payload (用于保留历史对话)
-            if request.conversation_id:
-                payload["conversation_id"] = request.conversation_id
-                print(f"💬 流式接口使用 Conversation: {request.conversation_id}")
+            # 【关键2】如果有 conversation_id,添加到 payload
+            if conversation_id:
+                payload["conversation_id"] = conversation_id
+                print(f"💬 流式接口使用 Conversation: {conversation_id}")
 
             # 如果有额外参数，合并到 parameters
             if request.parameters:
@@ -655,6 +746,8 @@ async def chat_stream(request: ChatRequest):
 
                 # 处理 SSE 流
                 event_type = None
+                returned_conversation_id = None
+
                 for line in response.iter_lines():
                     if not line:
                         continue
@@ -666,6 +759,10 @@ async def chat_stream(request: ChatRequest):
                         try:
                             data_str = line[5:].strip()
                             data = json.loads(data_str)
+
+                            # 提取 conversation_id (如果存在)
+                            if 'conversation_id' in data and not returned_conversation_id:
+                                returned_conversation_id = data['conversation_id']
 
                             # 处理消息增量事件 - 实时推送
                             if event_type == 'conversation.message.delta':
@@ -691,6 +788,11 @@ async def chat_stream(request: ChatRequest):
                         except json.JSONDecodeError:
                             # 跳过非 JSON 数据
                             pass
+
+            # 【关键3】如果是首次对话,保存自动生成的 conversation_id
+            if not conversation_id and returned_conversation_id:
+                conversation_cache[session_id] = returned_conversation_id
+                print(f"✅ 流式接口保存新 conversation: {returned_conversation_id} (session: {session_id})")
 
             # 发送完成事件
             yield f"data: {json.dumps({'type': 'done', 'content': ''}, ensure_ascii=False)}\n\n"
@@ -723,7 +825,8 @@ async def get_bot_info():
     try:
         # 从环境变量读取配置
         bot_name = os.getenv("COZE_BOT_NAME", "Fiido 客服")
-        bot_icon_url = os.getenv("COZE_BOT_ICON_URL", "")
+        # 使用本地头像文件
+        bot_icon_url = os.getenv("COZE_BOT_ICON_URL", "http://localhost:8000/fiido2.png")
         bot_description = os.getenv("COZE_BOT_DESCRIPTION", "Fiido 智能客服助手")
         bot_welcome = os.getenv("COZE_BOT_WELCOME", "您好！我是Fiido智能客服助手,很高兴为您服务。请问有什么可以帮助您的？")
 
@@ -749,10 +852,21 @@ async def get_bot_info():
             "bot": {
                 "name": "Fiido 客服",
                 "description": "Fiido 智能客服助手",
-                "icon_url": "",
+                "icon_url": "http://localhost:8000/fiido2.png",
                 "welcome": "您好！有什么可以帮助您的？"
             }
         }
+
+
+@app.get("/fiido2.png")
+async def get_fiido_icon():
+    """返回 fiido2.png 头像文件"""
+    from fastapi.responses import FileResponse
+    icon_path = os.path.join(CURRENT_DIR, "fiido2.png")
+    if os.path.exists(icon_path):
+        return FileResponse(icon_path, media_type="image/png")
+    else:
+        raise HTTPException(status_code=404, detail="Icon not found")
 
 
 if __name__ == "__main__":

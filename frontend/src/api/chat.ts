@@ -26,6 +26,20 @@ export async function createNewConversation(sessionId: string): Promise<Conversa
   }
 }
 
+export async function clearConversationHistory(sessionId: string): Promise<ConversationResponse> {
+  try {
+    const response = await fetch(`${API_BASE}/api/conversation/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId })
+    })
+    return await response.json()
+  } catch (error) {
+    console.error('清除历史失败:', error)
+    return { success: false, error: String(error) }
+  }
+}
+
 export async function* streamChat(
   message: string,
   sessionId: string,

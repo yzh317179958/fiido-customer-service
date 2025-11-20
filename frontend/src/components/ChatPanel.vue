@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
+import { clearConversationHistory } from '@/api/chat'
 import ChatMessage from './ChatMessage.vue'
 import WelcomeScreen from './WelcomeScreen.vue'
 
@@ -81,13 +82,46 @@ const handleNewConversation = async () => {
   }
 }
 
-const handleNewSession = () => {
+const handleClearConversation = () => {
   closeMenu()
 
-  if (confirm('确定要开始新会话吗？这将清空所有对话记录并生成新的会话ID。')) {
-    console.log('🔄 清空会话并刷新页面')
-    sessionStorage.clear()
-    window.location.reload()
+  // 添加分隔线消息
+  chatStore.addMessage({
+    id: `divider-${Date.now()}`,
+    content: '--- 历史对话分隔线 ---',
+    role: 'system',
+    timestamp: new Date(),
+    sender: 'System',
+    isDivider: true
+  })
+  console.log('🗑️  已添加历史对话分隔线')
+}
+
+const handleNewSession = async () => {
+  closeMenu()
+
+  // 立即清空界面，无需等待
+  chatStore.clearMessages()
+  console.log('🔄 创建新会话...')
+
+  // 异步调用后端创建新会话，不阻塞UI
+  try {
+    const response = await fetch(`${API_BASE_URL.value}/api/conversation/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatStore.sessionId })
+    })
+
+    const data = await response.json()
+
+    if (data.success && data.conversation_id) {
+      chatStore.setConversationId(data.conversation_id)
+      console.log('✅ 新会话已创建, Conversation ID:', data.conversation_id)
+    } else {
+      console.error('⚠️  创建新会话失败:', data)
+    }
+  } catch (error) {
+    console.error('❌ 创建新会话异常:', error)
   }
 }
 
@@ -188,6 +222,30 @@ const handleKeyPress = (e: KeyboardEvent) => {
   }
 }
 
+// Initialize conversation on mount
+const initializeConversation = async () => {
+  try {
+    console.log('🔄 初始化会话...')
+
+    const response = await fetch(`${API_BASE_URL.value}/api/conversation/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: chatStore.sessionId })
+    })
+
+    const data = await response.json()
+
+    if (data.success && data.conversation_id) {
+      chatStore.setConversationId(data.conversation_id)
+      console.log('✅ 会话初始化成功, Conversation ID:', data.conversation_id)
+    } else {
+      console.error('⚠️  会话初始化失败:', data)
+    }
+  } catch (error) {
+    console.error('❌ 会话初始化异常:', error)
+  }
+}
+
 // Handle product inquiry from other components
 onMounted(() => {
   window.addEventListener('ask-product', ((e: CustomEvent) => {
@@ -197,6 +255,9 @@ onMounted(() => {
 
   // Load bot config
   loadBotConfig()
+
+  // Initialize conversation immediately
+  initializeConversation()
 })
 
 const loadBotConfig = async () => {
@@ -221,8 +282,11 @@ const loadBotConfig = async () => {
 // Close menu when clicking outside
 const handleClickOutside = (e: MouseEvent) => {
   const target = e.target as HTMLElement
-  if (!target.closest('.chat-menu') && !target.closest('.new-chat-btn')) {
-    closeMenu()
+  // 如果点击的不是菜单容器内的元素，则关闭菜单
+  if (!target.closest('.floating-menu-container')) {
+    if (showMenu.value) {
+      closeMenu()
+    }
   }
 }
 
@@ -244,31 +308,7 @@ onMounted(() => {
     <div class="chat-panel" :class="{ open: chatStore.isChatOpen }">
       <div class="chat-header">
         <h2>{{ chatStore.botConfig.name }}</h2>
-        <div class="chat-header-actions">
-          <button class="new-chat-btn" @click="toggleMenu" title="菜单">
-            <svg viewBox="0 0 24 24">
-              <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
-            </svg>
-          </button>
-          <button class="chat-close" @click="handleClose">&times;</button>
-        </div>
-      </div>
-
-      <!-- Chat Menu -->
-      <div class="chat-menu" :class="{ show: showMenu }">
-        <div class="chat-menu-item" @click="handleNewConversation">
-          <svg class="chat-menu-icon" viewBox="0 0 24 24">
-            <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
-            <path d="M11 12h2v2h-2v-2zm0-6h2v4h-2V6z"/>
-          </svg>
-          <span>新对话</span>
-        </div>
-        <div class="chat-menu-item" @click="handleNewSession">
-          <svg class="chat-menu-icon" viewBox="0 0 24 24">
-            <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
-          </svg>
-          <span>新会话</span>
-        </div>
+        <button class="chat-close" @click="handleClose">&times;</button>
       </div>
 
       <!-- Messages Area -->
@@ -298,6 +338,31 @@ onMounted(() => {
       <!-- Input Area -->
       <div class="chat-input-area">
         <div class="chat-input-wrapper">
+          <!-- Floating Action Menu -->
+          <div class="floating-menu-container">
+            <!-- Main Bubble Button -->
+            <button class="main-bubble" @click="toggleMenu" :class="{ active: showMenu }">
+              <svg v-if="!showMenu" class="plus-icon" viewBox="0 0 24 24">
+                <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+              </svg>
+              <svg v-else class="close-icon" viewBox="0 0 24 24">
+                <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+              </svg>
+            </button>
+
+            <!-- Sub Bubbles -->
+            <transition name="bubble">
+              <div v-if="showMenu" class="sub-bubbles">
+                <button class="sub-bubble" @click="handleClearConversation" title="清除对话">
+                  <span class="bubble-text">清除对话</span>
+                </button>
+                <button class="sub-bubble" @click="handleNewSession" title="新建对话">
+                  <span class="bubble-text">新建对话</span>
+                </button>
+              </div>
+            </transition>
+          </div>
+
           <input
             ref="inputRef"
             v-model="chatInput"
@@ -373,59 +438,80 @@ onMounted(() => {
   font-weight: 600;
 }
 
-.chat-header-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.new-chat-btn {
-  background: transparent;
+.chat-close {
+  background: none;
   border: none;
   color: #fff;
+  font-size: 28px;
   cursor: pointer;
+  padding: 0;
+  line-height: 1;
   width: 32px;
   height: 32px;
-  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.3s;
+  transition: opacity 0.2s;
+}
+
+.chat-close:hover {
+  opacity: 0.8;
+}
+
+/* Floating Action Menu */
+.floating-menu-container {
   position: relative;
+  display: flex;
+  align-items: center;
+  margin-right: 10px;
 }
 
-.new-chat-btn:hover {
-  background: rgba(255,255,255,0.1);
+.main-bubble {
+  width: 45px;
+  height: 45px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
 }
 
-.new-chat-btn svg {
-  width: 20px;
-  height: 20px;
+.main-bubble:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 16px rgba(102, 126, 234, 0.5);
+}
+
+.main-bubble.active {
+  transform: rotate(45deg);
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+.main-bubble svg {
+  width: 24px;
+  height: 24px;
   fill: #fff;
+  transition: transform 0.3s;
 }
 
-.chat-menu {
+.sub-bubbles {
   position: absolute;
-  top: 65px;
-  right: 60px;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-  overflow: hidden;
-  display: none;
-  z-index: 1001;
-  min-width: 200px;
+  left: 0;
+  bottom: 55px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: bubbleSlideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.chat-menu.show {
-  display: block;
-  animation: slideDown 0.2s ease-out;
-}
-
-@keyframes slideDown {
+@keyframes bubbleSlideUp {
   from {
     opacity: 0;
-    transform: translateY(-10px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -433,40 +519,47 @@ onMounted(() => {
   }
 }
 
-.chat-menu-item {
-  padding: 14px 20px;
+.bubble-enter-active,
+.bubble-leave-active {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.bubble-enter-from,
+.bubble-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.sub-bubble {
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 20px;
+  background: #fff;
+  border: 2px solid #667eea;
   cursor: pointer;
-  border-bottom: 1px solid #f0f0f0;
-  transition: background 0.2s;
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 14px;
-  color: #333;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: all 0.3s;
+  white-space: nowrap;
 }
 
-.chat-menu-item:last-child {
-  border-bottom: none;
+.sub-bubble:hover {
+  transform: scale(1.05);
+  background: #667eea;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
 }
 
-.chat-menu-item:hover {
-  background: #f5f5f5;
-}
-
-.chat-menu-icon {
-  width: 18px;
-  height: 18px;
-  fill: #666;
-}
-
-.chat-close {
-  background: none;
-  border: none;
+.sub-bubble:hover .bubble-text {
   color: #fff;
-  font-size: 24px;
-  cursor: pointer;
-  padding: 5px;
-  line-height: 1;
+}
+
+.bubble-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: #667eea;
+  transition: color 0.3s;
 }
 
 .chat-messages {
@@ -493,8 +586,8 @@ onMounted(() => {
 }
 
 .message-avatar {
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: #fff;
   display: flex;
@@ -505,14 +598,15 @@ onMounted(() => {
   font-size: 14px;
   flex-shrink: 0;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  padding: 3px;
+  padding: 4px;
   overflow: hidden;
 }
 
 .message-avatar img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
+  border-radius: 50%;
 }
 
 .message-body {

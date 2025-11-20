@@ -18,6 +18,7 @@ marked.setOptions({
 })
 
 const isUser = computed(() => props.message.role === 'user')
+const isDivider = computed(() => (props.message as any).isDivider === true)
 
 const formattedTime = computed(() => {
   const date = new Date(props.message.timestamp)
@@ -48,7 +49,15 @@ const senderName = computed(() => {
 </script>
 
 <template>
-  <div class="message" :class="{ user: isUser, bot: !isUser }">
+  <!-- Divider message -->
+  <div v-if="isDivider" class="divider-message">
+    <div class="divider-line"></div>
+    <span class="divider-text">{{ message.content }}</span>
+    <div class="divider-line"></div>
+  </div>
+
+  <!-- Normal message -->
+  <div v-else class="message" :class="{ user: isUser, bot: !isUser }">
     <div class="message-avatar">
       <img
         v-if="!isUser && chatStore.botConfig.icon_url"
@@ -71,6 +80,27 @@ const senderName = computed(() => {
 </template>
 
 <style scoped>
+/* Divider styles */
+.divider-message {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  padding: 0 10px;
+}
+
+.divider-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, transparent, #d0d0d0, transparent);
+}
+
+.divider-text {
+  color: #999;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .message {
   margin-bottom: 20px;
   display: flex;
@@ -88,8 +118,8 @@ const senderName = computed(() => {
 }
 
 .message-avatar {
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: #fff;
   display: flex;
@@ -100,7 +130,7 @@ const senderName = computed(() => {
   font-size: 14px;
   flex-shrink: 0;
   box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  padding: 3px;
+  padding: 4px;
   overflow: hidden;
   cursor: pointer;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -114,7 +144,8 @@ const senderName = computed(() => {
 .message-avatar img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
+  border-radius: 50%;
   transition: transform 0.3s ease;
 }
 
