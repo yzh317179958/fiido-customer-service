@@ -339,7 +339,7 @@ onMounted(() => {
       <div class="chat-input-area">
         <div class="chat-input-wrapper">
           <!-- Floating Action Menu -->
-          <div class="floating-menu-container">
+          <div class="floating-menu-container" @click.stop>
             <!-- Main Bubble Button -->
             <button class="main-bubble" @click="toggleMenu" :class="{ active: showMenu }">
               <svg v-if="!showMenu" class="plus-icon" viewBox="0 0 24 24">
