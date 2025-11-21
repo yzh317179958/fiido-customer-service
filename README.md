@@ -323,6 +323,337 @@ GET /api/health
 
 ---
 
+## 🤖 人工接管 API (P0-4)
+
+以下API用于实现AI与人工客服的无缝切换。
+
+### 7. 人工升级接口
+
+触发人工接管流程，将会话从AI模式切换到待人工模式。
+
+**请求**:
+```bash
+POST /api/manual/escalate
+Content-Type: application/json
+
+{
+  "session_name": "session_abc123",
+  "reason": "user_request"  # 或其他原因
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "session_name": "session_abc123",
+    "status": "pending_manual",
+    "escalation": {
+      "reason": "manual",
+      "details": "用户主动请求人工服务",
+      "severity": "high"
+    }
+  }
+}
+```
+
+**状态码**:
+- `200`: 升级成功
+- `409`: 已在人工接管中 (`MANUAL_IN_PROGRESS`)
+- `400`: 缺少必需参数
+
+### 8. 获取会话状态
+
+获取会话的完整状态，包括历史消息和当前状态。
+
+**请求**:
+```bash
+GET /api/sessions/{session_name}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "session": {
+      "session_name": "session_abc123",
+      "status": "pending_manual",
+      "history": [...],
+      "escalation": {...},
+      "assigned_agent": null
+    },
+    "audit_trail": []
+  }
+}
+```
+
+### 9. 人工消息写入
+
+在人工接管期间，坐席或用户发送的消息。
+
+**请求**:
+```bash
+POST /api/manual/messages
+Content-Type: application/json
+
+{
+  "session_name": "session_abc123",
+  "role": "agent",  # 或 "user"
+  "content": "您好，我是人工客服小王",
+  "agent_info": {
+    "agent_id": "agent_01",
+    "agent_name": "小王"
+  }
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "timestamp": 1763605000
+  }
+}
+```
+
+**说明**:
+- `role` 必须是 `"agent"` 或 `"user"`
+- 用户消息必须在 `manual_live` 状态下发送
+- 坐席消息会通过SSE推送给前端
+
+### 10. 坐席接入会话 (防抢单) ✨ **新增**
+
+坐席接入待处理的会话，支持防抢单逻辑。
+
+**请求**:
+```bash
+POST /api/sessions/{session_name}/takeover
+Content-Type: application/json
+
+{
+  "agent_id": "agent_001",
+  "agent_name": "小王"
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "session_name": "session_abc123",
+    "status": "manual_live",
+    "assigned_agent": {
+      "id": "agent_001",
+      "name": "小王"
+    }
+  }
+}
+```
+
+**状态码**:
+- `200`: 接入成功
+- `404`: 会话不存在
+- `409`: 会话已被其他坐席接入 (`ALREADY_TAKEN`)
+- `409`: 当前状态不允许接入 (`INVALID_STATUS`)
+- `400`: 缺少必需参数
+
+**防抢单逻辑**:
+- 只允许在 `pending_manual` 状态下接入
+- 同一会话只能被一个坐席接入
+- 已接入的会话会返回 409 错误
+
+### 11. 查询会话列表 ✨ **新增**
+
+获取会话列表，支持按状态筛选和分页。
+
+**请求**:
+```bash
+# 查询 pending_manual 状态的会话
+GET /api/sessions?status=pending_manual&limit=10&offset=0
+
+# 查询所有会话
+GET /api/sessions?limit=20&offset=0
+```
+
+**Query Parameters**:
+- `status` (可选): 会话状态筛选 (`pending_manual`, `manual_live`, `bot_active` 等)
+- `limit` (可选): 每页数量，默认 50
+- `offset` (可选): 偏移量，默认 0
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "sessions": [
+      {
+        "session_name": "session_123",
+        "status": "pending_manual",
+        "user_profile": {
+          "nickname": "访客A",
+          "vip": true
+        },
+        "updated_at": 1763695256.744,
+        "last_message_preview": {
+          "role": "user",
+          "content": "我要人工",
+          "timestamp": 1763695256.743
+        },
+        "escalation": {
+          "reason": "keyword",
+          "trigger_at": 1763695256.743,
+          "waiting_seconds": 120.5
+        },
+        "assigned_agent": null
+      }
+    ],
+    "total": 5,
+    "limit": 10,
+    "offset": 0,
+    "has_more": false
+  }
+}
+```
+
+**说明**:
+- 返回摘要格式，包含最后一条消息预览
+- 自动计算等待时间 (`waiting_seconds`)
+- 按更新时间倒序排列
+
+### 12. 会话统计 ✨ **新增**
+
+获取会话统计信息。
+
+**请求**:
+```bash
+GET /api/sessions/stats
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "total_sessions": 50,
+    "by_status": {
+      "bot_active": 35,
+      "pending_manual": 3,
+      "manual_live": 2,
+      "closed": 10
+    },
+    "active_sessions": 40,
+    "avg_waiting_time": 45.67
+  }
+}
+```
+
+**说明**:
+- `total_sessions`: 总会话数
+- `by_status`: 各状态会话数量
+- `active_sessions`: 活跃会话数（非 closed 状态）
+- `avg_waiting_time`: 平均等待时间（秒）
+
+### 13. 释放会话
+
+结束人工接管，将会话恢复为AI模式。
+
+**请求**:
+```bash
+POST /api/sessions/{session_name}/release
+Content-Type: application/json
+
+{
+  "agent_id": "agent_01",
+  "reason": "resolved"  # 或 "transferred", "timeout" 等
+}
+```
+
+**响应**:
+```json
+{
+  "success": true,
+  "data": {
+    "session_name": "session_abc123",
+    "status": "bot_active",
+    "last_manual_end_at": 1763605100
+  }
+}
+```
+
+---
+
+## 🔄 SSE 实时推送 (P0-5)
+
+系统支持通过 Server-Sent Events (SSE) 向前端实时推送人工接管相关事件。
+
+### 工作原理
+
+1. 前端建立 `/api/chat/stream` 长连接
+2. 后端在以下情况推送事件：
+   - 人工升级时 → 推送 `status_change`
+   - 坐席发送消息时 → 推送 `manual_message`
+   - 会话释放时 → 推送系统消息 + `status_change`
+
+### SSE 事件格式
+
+**状态变化事件**:
+```
+data: {
+  "type": "status_change",
+  "status": "pending_manual",
+  "reason": "user_request",
+  "timestamp": 1763605000
+}
+```
+
+**人工消息事件**:
+```
+data: {
+  "type": "manual_message",
+  "role": "agent",
+  "content": "您好，我是人工客服",
+  "timestamp": 1763605000,
+  "agent_id": "agent_01",
+  "agent_name": "小王"
+}
+```
+
+**系统消息事件**:
+```
+data: {
+  "type": "manual_message",
+  "role": "system",
+  "content": "人工服务已结束，AI 助手已接管对话",
+  "timestamp": 1763605100
+}
+```
+
+### 前端接收示例
+
+```javascript
+const eventSource = new EventSource('/api/chat/stream');
+
+eventSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+
+  if (data.type === 'status_change') {
+    console.log('状态变化:', data.status);
+    // 更新UI显示状态
+  }
+
+  if (data.type === 'manual_message') {
+    console.log('收到消息:', data.content);
+    // 显示消息到聊天界面
+  }
+};
+```
+
+---
+
 ## 会话隔离机制
 
 本系统实现了基于 `session_name` 的多用户会话隔离:
@@ -468,6 +799,146 @@ python3 tests/test_session_name.py
 ---
 ## 📊 版本历史
 
+### v2.3.0 (2025-11-20) - P0人工接管功能完成 🎉
+
+**P0-4: 核心API实现**:
+- ✅ `POST /api/manual/escalate` - 人工升级接口
+- ✅ `GET /api/sessions/{session_name}` - 获取会话状态
+- ✅ `POST /api/manual/messages` - 人工消息写入
+- ✅ `POST /api/sessions/{session_name}/release` - 释放会话
+- ✅ 状态机管理 (bot_active → pending_manual → manual_live)
+- ✅ 会话状态持久化 (SessionState)
+- ✅ 监管引擎集成 (Regulator)
+
+**P0-5: SSE实时推送**:
+- ✅ 人工消息推送 (manual_message事件)
+- ✅ 状态变化推送 (status_change事件)
+- ✅ 系统消息推送 (释放会话时)
+- ✅ 异步队列机制 (asyncio.Queue)
+- ✅ 自动注入到 `/api/chat/stream`
+
+**P0-6: JSON日志规范**:
+- ✅ 所有状态转换记录JSON格式日志
+- ✅ 人工升级事件日志
+- ✅ 消息写入事件日志
+- ✅ 会话释放事件日志
+
+**测试覆盖**:
+- ✅ `tests/test_p04_apis.py` - P0-4 API完整测试
+- ✅ `tests/test_p05_sse.py` - P0-5 SSE推送测试
+
+**文档更新**:
+- ✅ README 添加 P0-4 API文档
+- ✅ README 添加 P0-5 SSE文档
+- ✅ 前端接收示例代码
+
+**修改文件**:
+- `backend.py` - 新增 4 个 API 端点，SSE 队列机制
+- `src/session_state.py` - 会话状态模型
+- `src/regulator.py` - 监管引擎
+- `tests/test_p04_apis.py` - API 测试脚本
+- `tests/test_p05_sse.py` - SSE 测试脚本
+- `README.md` - 文档更新
+
+### v2.3.0 (2025-11-21) - 人工接管前端基础功能 ⭐ **P0阶段**
+
+**人工接管前端功能（P0-4 至 P0-6）**:
+- ✅ **状态管理扩展（P0-4）** - 扩展 Pinia Store 支持人工接管状态
+  - 新增 `SessionStatus` 状态类型（5种状态）
+  - 新增 `escalationInfo`、`agentInfo`、`isEscalating` 状态
+  - 新增 5 个计算属性：`isManualMode`、`canSendMessage`、`canEscalate`、`statusText`、`statusColorClass`
+  - 新增 6 个方法：`updateSessionStatus`、`setEscalationInfo`、`setAgentInfo`、`escalateToManual`、`refreshSessionStatus`、`resetManualState`
+
+- ✅ **状态指示器组件（P0-5）** - 显示会话状态的 StatusBar 组件
+  - 支持 5 种状态显示：AI服务中、等待人工接入、人工服务中、非工作时间、已关闭
+  - 状态点脉动动画
+  - 等待人工时显示跳动动画
+  - 人工服务时显示坐席头像
+  - 渐变背景色区分不同状态
+
+- ✅ **转人工按钮（P0-6）** - 集成到气泡菜单的转人工功能
+  - 添加"转人工"按钮到浮动气泡菜单
+  - 智能禁用逻辑（基于 `canEscalate` 计算属性）
+  - 完整的错误处理和用户提示
+  - 自动添加系统消息提示
+  - 禁用状态灰色样式
+
+**类型定义扩展**:
+- ✅ 扩展 `Message.role` 支持 'agent' | 'system'
+- ✅ 新增 `SessionStatus`、`EscalationReason`、`EscalationSeverity` 类型
+- ✅ 新增 `AgentInfo`、`EscalationInfo`、`SSEEvent` 接口
+- ✅ 新增 `ManualEscalateRequest/Response`、`SessionStateResponse` 接口
+
+**开发流程规范（重大更新）**:
+- ✅ **建立4阶段开发流程** - 确保所有开发不破坏核心功能
+  - 🔴 阶段1: 开发前审查（约束文档审查、基线测试、设计审查）
+  - 🟡 阶段2: 开发中约束（Coze API 调用规范、代码实现检查）
+  - 🟢 阶段3: 开发后验证（单元测试、约束遵守验证、手动验证）
+  - 🔵 阶段4: 文档同步更新（必须更新5个核心文档）
+
+**测试验证**:
+- ✅ TypeScript 类型检查通过
+- ✅ 核心功能回归测试 15/15 通过 (100%)
+- ✅ 所有新功能遵守技术约束
+- ✅ 向后兼容性验证通过
+
+**文档更新**:
+- ✅ 更新 `prd/prd.md` - 添加362行开发流程规范章节
+- ✅ 更新 `prd/CONSTRAINTS_AND_PRINCIPLES.md` - 添加6个新约束
+- ✅ 更新 `prd/TECHNICAL_SOLUTION_v1.0.md` - 添加实现验证结果
+- ✅ 更新 `prd/IMPLEMENTATION_TASKS_v1.0.md` - 标记P0-4/5/6完成
+
+**P0 用户前端功能（P0-7 至 P0-9）**:
+- ✅ P0-7: 实现人工消息渲染 ⭐ **已完成**
+- ✅ P0-8: 扩展SSE事件处理 ⭐ **已完成**
+- ✅ P0-9: 实现输入控制逻辑 ⭐ **已完成**
+  - ✅ 状态-行为映射（bot_active、pending_manual、manual_live）
+  - ✅ 动态 placeholder 和输入控制
+  - ✅ 等待提示和脉动动画
+  - ✅ **智能状态轮询** (2025-11-21 补充)
+  - ✅ **历史消息自动同步** (2025-11-21 补充)
+
+**P1 坐席工作台功能（P0-10 至 P0-15）**:
+- ✅ P0-10: 创建工作台项目 ⭐ **已完成** (2025-11-21)
+  - ✅ Vite + Vue 3 + TypeScript 项目架构
+  - ✅ 端口 5174（独立于用户前端）
+  - ✅ API 代理到后端 8000 端口
+  - ✅ 完整目录结构（views, components, stores, api, types）
+  - ✅ 路径别名配置（@ → src）
+  - ✅ TypeScript 类型检查通过
+  - ✅ 项目启动测试通过
+- ✅ P0-11: 实现登录认证 ⭐ **已完成** (2025-11-21)
+  - ✅ 登录页面（Login.vue）- 渐变背景，输入坐席ID和姓名
+  - ✅ 工作台首页（Dashboard.vue）- 显示坐席信息和功能预览
+  - ✅ 状态管理（agentStore.ts）- Pinia Store 管理登录状态
+  - ✅ 路由守卫 - 认证保护，未登录跳转登录页
+  - ✅ 会话持久化 - localStorage 保存登录信息
+  - ✅ TypeScript 类型定义 - 完整的 Agent/Session/Message 类型
+  - ✅ 测试验证通过 - TypeScript 检查通过，核心功能无影响
+- [ ] P0-12: 实现会话列表
+- [ ] P0-13: 实现接入操作
+- [ ] P0-14: 实现坐席聊天
+- [ ] P0-15: 实现释放操作
+
+**P0 用户前端功能全部完成** 🎉
+**P1 坐席工作台开发中** 🚧
+
+**重要说明**:
+- P0-9 包含智能轮询机制，无需 SSE 连接即可实时同步坐席接入和消息
+- 轮询间隔: 2秒，仅在 pending_manual 和 manual_live 状态下运行
+- 详细说明见: `docs/P0-9_补充修复-状态轮询和消息同步.md`
+
+**修改文件**:
+- `frontend/src/types/index.ts` - 扩展类型定义
+- `frontend/src/stores/chatStore.ts` - 扩展状态管理
+- `frontend/src/components/StatusBar.vue` - 新建状态指示器
+- `frontend/src/components/ChatPanel.vue` - 集成状态栏、转人工按钮、SSE事件处理、输入控制逻辑 ⭐ **P0-9更新**
+- `frontend/src/components/ChatMessage.vue` - 扩展消息渲染支持人工消息
+- `prd/prd.md` - 添加开发流程规范
+- `prd/CONSTRAINTS_AND_PRINCIPLES.md` - 添加新约束
+- `prd/TECHNICAL_SOLUTION_v1.0.md` - 添加验证结果
+- `prd/IMPLEMENTATION_TASKS_v1.0.md` - 更新任务完成状态 ⭐ **P0-9更新**
+
 ### v2.2.2 (2025-11-20) - 修复测试脚本，验证会话隔离
 
 **测试修复**:
@@ -557,7 +1028,7 @@ Session B → Conversation: 7574686112397737989
 ---
 
 **最后更新**: 2025-11-20
-**当前版本**: v2.2.1
+**当前版本**: v2.3.0
 
 ---
 

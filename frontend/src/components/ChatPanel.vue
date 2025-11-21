@@ -1,17 +1,42 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useChatStore } from '@/stores/chatStore'
 import { clearConversationHistory } from '@/api/chat'
 import ChatMessage from './ChatMessage.vue'
 import WelcomeScreen from './WelcomeScreen.vue'
+import StatusBar from './StatusBar.vue'
 
 const chatStore = useChatStore()
 const chatInput = ref('')
 const chatMessagesRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLInputElement | null>(null)
 const showMenu = ref(false)
+let statusPollInterval: number | null = null
 
 const API_BASE_URL = computed(() => `http://${window.location.hostname}:8000`)
+
+// 🔴 P0-9.5: 输入框禁用逻辑
+const isInputDisabled = computed(() => {
+  return chatStore.isLoading || chatStore.sessionStatus === 'closed'
+})
+
+// 🔴 P0-9.6: 动态 placeholder
+const inputPlaceholder = computed(() => {
+  switch (chatStore.sessionStatus) {
+    case 'bot_active':
+      return '请输入您的问题...'
+    case 'pending_manual':
+      return '等待人工接入...'
+    case 'manual_live':
+      return '向客服发送消息...'
+    case 'after_hours_email':
+      return '非工作时间，请留言'
+    case 'closed':
+      return '会话已关闭'
+    default:
+      return '请输入消息...'
+  }
+})
 
 // Auto-scroll to bottom
 const scrollToBottom = () => {
@@ -125,11 +150,52 @@ const handleNewSession = async () => {
   }
 }
 
+const handleEscalateToManual = async () => {
+  closeMenu()
+
+  if (!chatStore.canEscalate) {
+    console.warn('⚠️  当前状态不允许转人工')
+    return
+  }
+
+  if (!confirm('确定要转接人工客服吗？')) {
+    return
+  }
+
+  try {
+    console.log('🚀 发起转人工请求...')
+    const success = await chatStore.escalateToManual('manual')
+
+    if (success) {
+      console.log('✅ 转人工成功')
+      alert('✅ 已转接人工客服，请稍候...')
+
+      // 添加系统消息提示
+      chatStore.addMessage({
+        id: `system-${Date.now()}`,
+        content: '正在为您转接人工客服，请稍候...',
+        role: 'system',
+        timestamp: new Date(),
+        sender: 'System'
+      })
+    } else {
+      alert('❌ 转人工失败，请稍后重试')
+      console.error('❌ 转人工失败')
+    }
+  } catch (error) {
+    alert('❌ 请求失败: ' + (error as Error).message)
+    console.error('❌ 转人工异常:', error)
+  }
+}
+
 const sendMessage = async () => {
   if (chatStore.isLoading || !chatInput.value.trim()) return
 
   const message = chatInput.value.trim()
   chatInput.value = ''
+
+  // 🔴 P0-9.1: 根据状态判断发送方式
+  const status = chatStore.sessionStatus
 
   // Add user message
   chatStore.addMessage({
@@ -143,6 +209,43 @@ const sendMessage = async () => {
   chatStore.setLoading(true)
 
   try {
+    // 🔴 P0-9.2: pending_manual状态 - 禁止发送
+    if (status === 'pending_manual') {
+      chatStore.addMessage({
+        id: `system-${Date.now()}`,
+        content: '正在为您转接人工客服，请稍候...',
+        role: 'system',
+        timestamp: new Date(),
+        sender: 'System'
+      })
+      chatStore.setLoading(false)
+      return
+    }
+
+    // 🔴 P0-9.3: manual_live状态 - 调用人工消息接口
+    if (status === 'manual_live') {
+      const response = await fetch(`${API_BASE_URL.value}/api/manual/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_name: chatStore.sessionId,
+          role: 'user',
+          content: message
+        })
+      })
+
+      const data = await response.json()
+
+      if (!data.success) {
+        throw new Error(data.error || '发送失败')
+      }
+
+      console.log('✅ 人工模式消息已发送')
+      chatStore.setLoading(false)
+      return
+    }
+
+    // 🔴 P0-9.4: bot_active状态 - 调用AI接口（现有逻辑）
     const requestBody: any = {
       message,
       user_id: chatStore.sessionId
@@ -188,11 +291,63 @@ const sendMessage = async () => {
           try {
             const data = JSON.parse(line.slice(6))
 
+            // 🔴 P0-8.1: AI消息（现有逻辑）
             if (data.type === 'message') {
               chatStore.updateLastMessage(data.content)
               scrollToBottom()
-            } else if (data.type === 'error') {
+            }
+
+            // 🔴 P0-8.2: 错误消息（现有逻辑）
+            else if (data.type === 'error') {
               chatStore.updateLastMessage('抱歉，发生了错误：' + data.content)
+
+              // 如果是人工接管错误
+              if (data.content === 'MANUAL_IN_PROGRESS') {
+                chatStore.updateSessionStatus('manual_live')
+              }
+            }
+
+            // 🔴 P0-8.3: 人工消息（新增）
+            else if (data.type === 'manual_message') {
+              if (data.role === 'agent') {
+                // 坐席消息
+                chatStore.addMessage({
+                  id: Date.now().toString(),
+                  content: data.content,
+                  role: 'agent',
+                  timestamp: new Date(data.timestamp * 1000),
+                  agent_info: {
+                    id: data.agent_id,
+                    name: data.agent_name
+                  }
+                })
+              } else if (data.role === 'system') {
+                // 系统消息
+                chatStore.addMessage({
+                  id: `system-${Date.now()}`,
+                  content: data.content,
+                  role: 'system',
+                  timestamp: new Date(data.timestamp * 1000),
+                  sender: 'System'
+                })
+              }
+              scrollToBottom()
+              console.log('📨 收到人工消息:', data.role, data.content)
+            }
+
+            // 🔴 P0-8.4: 状态变化（新增）
+            else if (data.type === 'status_change') {
+              chatStore.updateSessionStatus(data.status)
+
+              // 如果转为人工模式，保存坐席信息
+              if (data.status === 'manual_live' && data.agent_info) {
+                chatStore.setAgentInfo({
+                  id: data.agent_info.agent_id,
+                  name: data.agent_info.agent_name
+                })
+              }
+
+              console.log('📊 SSE状态变化:', data.status)
             }
           } catch (e) {
             console.error('解析错误:', e)
@@ -203,11 +358,11 @@ const sendMessage = async () => {
   } catch (error) {
     console.error('错误:', error)
     chatStore.addMessage({
-      id: (Date.now() + 2).toString(),
-      content: '抱歉，连接服务器失败，请稍后重试。',
-      role: 'assistant',
+      id: `system-${Date.now()}`,
+      content: '抱歉，发送失败，请稍后重试。',
+      role: 'system',
       timestamp: new Date(),
-      sender: chatStore.botConfig.name
+      sender: 'System'
     })
   } finally {
     chatStore.setLoading(false)
@@ -279,6 +434,134 @@ const loadBotConfig = async () => {
   }
 }
 
+// 🔴 新增: 轮询会话状态
+const pollSessionStatus = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL.value}/api/sessions/${chatStore.sessionId}`)
+
+    if (response.status === 404) {
+      // 会话不存在，这是正常情况（新会话）
+      return
+    }
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const data = await response.json()
+
+    if (data.success && data.data.session) {
+      const session = data.data.session
+      const newStatus = session.status
+
+      // 只在状态真正变化时更新
+      if (newStatus !== chatStore.sessionStatus) {
+        console.log(`🔄 状态轮询: ${chatStore.sessionStatus} → ${newStatus}`)
+        chatStore.updateSessionStatus(newStatus)
+
+        // 如果转为 manual_live，保存坐席信息
+        if (newStatus === 'manual_live' && session.assigned_agent) {
+          chatStore.setAgentInfo({
+            id: session.assigned_agent.id,
+            name: session.assigned_agent.name
+          })
+        }
+      }
+
+      // 🔴 新增: 同步历史消息（检查是否有新消息）
+      if (session.history && session.history.length > 0) {
+        // 获取后端最后一条消息
+        const lastBackendMessage = session.history[session.history.length - 1]
+        const lastBackendTimestamp = lastBackendMessage.timestamp
+
+        // 获取前端最后一条消息
+        const frontendMessages = chatStore.messages
+        const lastFrontendMessage = frontendMessages.length > 0
+          ? frontendMessages[frontendMessages.length - 1]
+          : null
+
+        const lastFrontendTimestamp = lastFrontendMessage
+          ? lastFrontendMessage.timestamp.getTime() / 1000
+          : 0
+
+        // 如果后端有新消息（时间戳更新）
+        if (lastBackendTimestamp > lastFrontendTimestamp) {
+          console.log('📨 检测到新消息，同步历史')
+
+          // 找出所有新消息（时间戳大于前端最后一条消息）
+          const newMessages = session.history.filter((msg: any) =>
+            msg.timestamp > lastFrontendTimestamp
+          )
+
+          // 添加新消息到前端
+          newMessages.forEach((msg: any) => {
+            // 检查是否已存在（避免重复）
+            const exists = chatStore.messages.some(
+              m => Math.abs(m.timestamp.getTime() / 1000 - msg.timestamp) < 0.1
+            )
+
+            if (!exists) {
+              chatStore.addMessage({
+                id: `${msg.role}-${msg.timestamp}`,
+                content: msg.content,
+                role: msg.role,
+                timestamp: new Date(msg.timestamp * 1000),
+                sender: msg.role === 'agent' ? (msg.agent_name || '客服') :
+                        msg.role === 'user' ? '我' : 'System',
+                agent_info: msg.agent_id ? {
+                  id: msg.agent_id,
+                  name: msg.agent_name || '客服'
+                } : undefined
+              })
+              console.log(`✅ 添加新消息: ${msg.role} - ${msg.content.substring(0, 20)}...`)
+            }
+          })
+
+          scrollToBottom()
+        }
+      }
+    }
+  } catch (error) {
+    console.error('⚠️  状态轮询失败:', error)
+  }
+}
+
+// 启动状态轮询（仅在 pending_manual 或 manual_live 状态下）
+const startStatusPolling = () => {
+  if (statusPollInterval !== null) {
+    return // 已经在轮询
+  }
+
+  console.log('🔄 启动状态轮询')
+  statusPollInterval = window.setInterval(() => {
+    const status = chatStore.sessionStatus
+    if (status === 'pending_manual' || status === 'manual_live') {
+      pollSessionStatus()
+    } else if (status === 'bot_active' || status === 'closed') {
+      // 恢复到稳定状态，停止轮询
+      stopStatusPolling()
+    }
+  }, 2000) // 每2秒轮询一次
+}
+
+// 停止状态轮询
+const stopStatusPolling = () => {
+  if (statusPollInterval !== null) {
+    console.log('⏸️  停止状态轮询')
+    clearInterval(statusPollInterval)
+    statusPollInterval = null
+  }
+}
+
+// 监听状态变化，自动启动/停止轮询
+watch(() => chatStore.sessionStatus, (newStatus) => {
+  if (newStatus === 'pending_manual' || newStatus === 'manual_live') {
+    startStatusPolling()
+  } else if (newStatus === 'bot_active' || newStatus === 'closed') {
+    stopStatusPolling()
+  }
+})
+
 // Close menu when clicking outside
 const handleClickOutside = (e: MouseEvent) => {
   const target = e.target as HTMLElement
@@ -292,6 +575,12 @@ const handleClickOutside = (e: MouseEvent) => {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+})
+
+// 组件卸载时清理轮询
+onUnmounted(() => {
+  stopStatusPolling()
+  document.removeEventListener('click', handleClickOutside)
 })
 </script>
 
@@ -310,6 +599,9 @@ onMounted(() => {
         <h2>{{ chatStore.botConfig.name }}</h2>
         <button class="chat-close" @click="handleClose">&times;</button>
       </div>
+
+      <!-- Status Bar (新增) -->
+      <StatusBar />
 
       <!-- Messages Area -->
       <div class="chat-messages" ref="chatMessagesRef">
@@ -353,6 +645,15 @@ onMounted(() => {
             <!-- Sub Bubbles -->
             <transition name="bubble">
               <div v-if="showMenu" class="sub-bubbles">
+                <button
+                  class="sub-bubble"
+                  @click="handleEscalateToManual"
+                  title="转人工客服"
+                  :disabled="!chatStore.canEscalate"
+                  :class="{ disabled: !chatStore.canEscalate }"
+                >
+                  <span class="bubble-text">转人工</span>
+                </button>
                 <button class="sub-bubble" @click="handleClearConversation" title="清除对话">
                   <span class="bubble-text">清除对话</span>
                 </button>
@@ -368,19 +669,25 @@ onMounted(() => {
             v-model="chatInput"
             type="text"
             class="chat-input"
-            placeholder="请输入您的问题..."
+            :placeholder="inputPlaceholder"
             @keypress="handleKeyPress"
-            :disabled="chatStore.isLoading"
+            :disabled="isInputDisabled"
           >
           <button
             class="chat-send"
             @click="sendMessage"
-            :disabled="chatStore.isLoading || !chatInput.trim()"
+            :disabled="isInputDisabled || !chatInput.trim()"
           >
             <svg viewBox="0 0 24 24">
               <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
             </svg>
           </button>
+        </div>
+
+        <!-- 🔴 P0-9.7: 等待提示 -->
+        <div v-if="chatStore.sessionStatus === 'pending_manual'" class="waiting-tip">
+          <span class="tip-icon">⏳</span>
+          <span>正在为您转接人工客服，请稍候...</span>
         </div>
       </div>
     </div>
@@ -555,6 +862,26 @@ onMounted(() => {
   color: #fff;
 }
 
+.sub-bubble.disabled {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.sub-bubble.disabled:hover {
+  transform: none;
+  background: #f3f4f6;
+}
+
+.sub-bubble.disabled .bubble-text {
+  color: #9ca3af;
+}
+
+.sub-bubble.disabled:hover .bubble-text {
+  color: #9ca3af;
+}
+
 .bubble-text {
   font-size: 14px;
   font-weight: 500;
@@ -695,6 +1022,34 @@ onMounted(() => {
   width: 20px;
   height: 20px;
   fill: #fff;
+}
+
+/* 🔴 P0-9.8: 等待提示样式 */
+.waiting-tip {
+  padding: 12px;
+  background: #FEF3C7;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #92400E;
+  margin-top: 8px;
+  animation: fadeIn 0.3s ease-in;
+}
+
+.tip-icon {
+  font-size: 18px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 /* Responsive */

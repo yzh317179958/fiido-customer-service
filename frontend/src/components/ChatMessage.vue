@@ -17,7 +17,10 @@ marked.setOptions({
   gfm: true,
 })
 
+// 判断消息类型
 const isUser = computed(() => props.message.role === 'user')
+const isAgent = computed(() => props.message.role === 'agent')
+const isSystem = computed(() => props.message.role === 'system')
 const isDivider = computed(() => (props.message as any).isDivider === true)
 
 const formattedTime = computed(() => {
@@ -29,38 +32,46 @@ const renderedContent = computed(() => {
   if (isUser.value) {
     return props.message.content
   }
-  // Render markdown for bot messages
+  // Render markdown for bot and agent messages
   return marked.parse(props.message.content)
 })
 
+// 头像内容
 const avatarContent = computed(() => {
   if (isUser.value) {
     return '我'
   }
+  if (isAgent.value) {
+    return '👤'  // 人工客服图标
+  }
   return chatStore.botConfig.name.charAt(0)
 })
 
+// 发送者名称
 const senderName = computed(() => {
   if (isUser.value) {
     return '我'
+  }
+  if (isAgent.value) {
+    return props.message.agent_info?.name || '客服'
   }
   return chatStore.botConfig.name
 })
 </script>
 
 <template>
-  <!-- Divider message -->
-  <div v-if="isDivider" class="divider-message">
-    <div class="divider-line"></div>
-    <span class="divider-text">{{ message.content }}</span>
-    <div class="divider-line"></div>
+  <!-- System message (包括分隔线) -->
+  <div v-if="isSystem || isDivider" class="system-message">
+    <div class="system-divider"></div>
+    <span class="system-text">{{ message.content }}</span>
+    <div class="system-divider"></div>
   </div>
 
-  <!-- Normal message -->
-  <div v-else class="message" :class="{ user: isUser, bot: !isUser }">
-    <div class="message-avatar">
+  <!-- Normal message (用户、AI、人工) -->
+  <div v-else class="message" :class="{ user: isUser, bot: !isUser && !isAgent, agent: isAgent }">
+    <div class="message-avatar" :class="{ 'agent-avatar': isAgent }">
       <img
-        v-if="!isUser && chatStore.botConfig.icon_url"
+        v-if="!isUser && !isAgent && chatStore.botConfig.icon_url"
         :src="chatStore.botConfig.icon_url"
         :alt="chatStore.botConfig.name"
       >
@@ -68,7 +79,8 @@ const senderName = computed(() => {
     </div>
     <div class="message-body">
       <div class="message-header">
-        <span class="message-sender">{{ senderName }}</span>
+        <span class="message-sender" :class="{ 'agent-name': isAgent }">{{ senderName }}</span>
+        <span v-if="isAgent" class="agent-badge">人工</span>
         <span class="message-time">{{ formattedTime }}</span>
       </div>
       <div class="message-content" v-if="isUser">
@@ -80,27 +92,29 @@ const senderName = computed(() => {
 </template>
 
 <style scoped>
-/* Divider styles */
-.divider-message {
+/* System message styles */
+.system-message {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 20px 0;
-  padding: 0 10px;
+  padding: 12px 0;
+  margin: 16px 0;
 }
 
-.divider-line {
+.system-divider {
   flex: 1;
   height: 1px;
-  background: linear-gradient(to right, transparent, #d0d0d0, transparent);
+  background: linear-gradient(90deg, transparent, #e0e0e0, transparent);
 }
 
-.divider-text {
-  color: #999;
-  font-size: 12px;
+.system-text {
+  color: #6B7280;
+  font-size: 13px;
   white-space: nowrap;
 }
 
+/* Message base styles */
 .message {
   margin-bottom: 20px;
   display: flex;
@@ -157,6 +171,13 @@ const senderName = computed(() => {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
 }
 
+/* Agent avatar - 渐变紫色 */
+.message-avatar.agent-avatar {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 18px;
+}
+
 .message-body {
   display: flex;
   flex-direction: column;
@@ -178,6 +199,23 @@ const senderName = computed(() => {
 .message-sender {
   font-weight: 600;
   color: #333;
+}
+
+/* Agent name - 蓝色加粗 */
+.message-sender.agent-name {
+  font-weight: 600;
+  color: #1E40AF;
+  font-size: 13px;
+}
+
+/* Agent badge - 人工标签 */
+.agent-badge {
+  background: #3B82F6;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .message-time {
@@ -203,6 +241,14 @@ const senderName = computed(() => {
   color: #000;
   border: 1px solid #e0e0e0;
   border-bottom-left-radius: 0;
+}
+
+/* Agent message - 浅蓝色背景 + 左侧蓝色边框 */
+.message.agent .message-content {
+  background: #EFF6FF;
+  color: #000;
+  border-left: 3px solid #3B82F6;
+  border-radius: 12px 12px 12px 0;
 }
 
 /* Markdown styles */

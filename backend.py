@@ -14,6 +14,7 @@ Fiido智能客服后端服务
 import os
 import json
 import time
+import asyncio
 from typing import Optional
 from contextlib import asynccontextmanager
 import uuid
@@ -95,6 +96,10 @@ AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
 # 实现原理: 首次不传 conversation_id,Coze 会自动生成并返回
 # 后续对话必须传入相同的 conversation_id 以保持上下文
 conversation_cache: dict = {}  # {session_name: conversation_id}
+
+# P0-5: SSE 消息队列 - 用于人工消息推送
+# 结构: {session_name: asyncio.Queue()}
+sse_queues: dict = {}  # type: dict[str, asyncio.Queue]
 
 
 @asynccontextmanager
@@ -555,12 +560,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     conversation_id=conversation_id_for_state
                 )
 
-                # 如果正在人工接管中，返回 409 状态码
-                if session_state.status == SessionStatus.MANUAL_LIVE:
-                    print(f"⚠️  会话 {session_id} 正在人工接管中，拒绝AI对话")
+                # 🔴 P0-1: 如果正在人工接管中(包括等待人工和人工服务中)，返回 409 状态码
+                if session_state.status in [SessionStatus.PENDING_MANUAL, SessionStatus.MANUAL_LIVE]:
+                    print(f"⚠️  会话 {session_id} 状态为 {session_state.status.value}，拒绝AI对话")
                     raise HTTPException(
                         status_code=409,
-                        detail="MANUAL_IN_PROGRESS"
+                        detail=f"SESSION_IN_MANUAL_MODE: {session_state.status.value}"
                     )
 
                 print(f"📊 会话状态: {session_state.status.value}")
@@ -797,6 +802,12 @@ async def chat_stream(request: ChatRequest):
             # 获取会话标识（session_id），如果没有则生成
             session_id = request.user_id or generate_user_id()
 
+            # 【P0-5】创建 SSE 消息队列（如果不存在）
+            global sse_queues
+            if session_id not in sse_queues:
+                sse_queues[session_id] = asyncio.Queue()
+                print(f"✅ SSE 队列已创建: {session_id}")
+
             # 【P0-3 前置处理】检查会话状态 - 如果正在人工接管，拒绝AI对话
             if session_store and regulator:
                 try:
@@ -807,12 +818,12 @@ async def chat_stream(request: ChatRequest):
                         conversation_id=conversation_id_for_state
                     )
 
-                    # 如果正在人工接管中，发送错误事件
-                    if session_state.status == SessionStatus.MANUAL_LIVE:
-                        print(f"⚠️  流式会话 {session_id} 正在人工接管中，拒绝AI对话")
+                    # 🔴 P0-1: 如果正在人工接管中(包括等待人工和人工服务中)，发送错误事件
+                    if session_state.status in [SessionStatus.PENDING_MANUAL, SessionStatus.MANUAL_LIVE]:
+                        print(f"⚠️  流式会话 {session_id} 状态为 {session_state.status.value}，拒绝AI对话")
                         error_data = {
                             "type": "error",
-                            "content": "MANUAL_IN_PROGRESS"
+                            "content": f"SESSION_IN_MANUAL_MODE: {session_state.status.value}"
                         }
                         yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
                         return
@@ -895,6 +906,15 @@ async def chat_stream(request: ChatRequest):
                 full_ai_response = []  # 【P0-3】收集完整AI响应用于监管检查
 
                 for line in response.iter_lines():
+                    # 【P0-5】检查队列中的人工消息，优先推送
+                    try:
+                        while not sse_queues[session_id].empty():
+                            queued_msg = await sse_queues[session_id].get()
+                            yield f"data: {json.dumps(queued_msg, ensure_ascii=False)}\n\n"
+                            print(f"✅ SSE 推送队列消息: {queued_msg.get('type')}")
+                    except Exception as queue_error:
+                        print(f"⚠️  SSE 队列检查异常: {str(queue_error)}")
+
                     if not line:
                         continue
 
@@ -1113,16 +1133,17 @@ async def manual_escalate(request: dict):
             raise HTTPException(status_code=409, detail="MANUAL_IN_PROGRESS")
 
         # 更新升级信息
+        # 将 user_request 映射到正确的枚举值 "manual"
+        escalation_reason = "manual" if reason == "user_request" else reason
         session_state.escalation = EscalationInfo(
-            reason=reason,
+            reason=escalation_reason,
             details=f"用户主动请求人工服务" if reason == "user_request" else f"触发原因: {reason}",
             severity="high" if reason == "user_request" else "low"
         )
 
         # 状态转换为 pending_manual
         session_state.transition_status(
-            new_status=SessionStatus.PENDING_MANUAL,
-            operator="user"
+            new_status=SessionStatus.PENDING_MANUAL
         )
 
         # 保存会话状态
@@ -1137,9 +1158,19 @@ async def manual_escalate(request: dict):
             "timestamp": int(time.time())
         }, ensure_ascii=False))
 
+        # P0-5: 推送状态变化事件到 SSE
+        if session_name in sse_queues:
+            await sse_queues[session_name].put({
+                "type": "status_change",
+                "status": session_state.status.value,
+                "reason": reason,
+                "timestamp": int(time.time())
+            })
+            print(f"✅ SSE 推送状态变化: {session_state.status.value}")
+
         return {
             "success": True,
-            "data": session_state.to_dict()
+            "data": session_state.model_dump()
         }
 
     except HTTPException:
@@ -1147,6 +1178,44 @@ async def manual_escalate(request: dict):
     except Exception as e:
         print(f"❌ 人工升级失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"升级失败: {str(e)}")
+
+
+@app.get("/api/sessions/stats")
+async def get_sessions_stats():
+    """获取会话统计信息"""
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+    try:
+        stats = await session_store.get_stats()
+
+        # 计算平均等待时间
+        pending_sessions = await session_store.list_by_status(
+            status=SessionStatus.PENDING_MANUAL,
+            limit=100
+        )
+
+        if pending_sessions:
+            current_time = time.time()
+            waiting_times = [
+                current_time - session.escalation.trigger_at
+                for session in pending_sessions
+                if session.escalation
+            ]
+            avg_waiting_time = sum(waiting_times) / len(waiting_times) if waiting_times else 0
+        else:
+            avg_waiting_time = 0
+
+        stats["avg_waiting_time"] = round(avg_waiting_time, 2)
+
+        return {
+            "success": True,
+            "data": stats
+        }
+
+    except Exception as e:
+        print(f"❌ 获取统计信息失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
 @app.get("/api/sessions/{session_name}")
@@ -1171,7 +1240,7 @@ async def get_session_state(session_name: str):
         return {
             "success": True,
             "data": {
-                "session": session_state.to_dict(),
+                "session": session_state.model_dump(),
                 "audit_trail": audit_trail
             }
         }
@@ -1220,10 +1289,12 @@ async def manual_message(request: dict):
             raise HTTPException(status_code=409, detail="Session not in manual_live status")
 
         # 创建消息
+        agent_info = request.get("agent_info", {})
         message = Message(
             role=role,
             content=content,
-            agent_info=request.get("agent_info")  # 可选坐席信息
+            agent_id=agent_info.get("agent_id") if agent_info else None,
+            agent_name=agent_info.get("agent_name") if agent_info else None
         )
 
         # 添加到历史
@@ -1237,16 +1308,24 @@ async def manual_message(request: dict):
             "event": "manual_message",
             "session_name": session_name,
             "role": role,
-            "message_id": message.id,
-            "timestamp": int(time.time())
+            "timestamp": message.timestamp
         }, ensure_ascii=False))
 
-        # TODO P0-5: 通过 SSE 推送消息 {"type":"manual_message",...}
+        # P0-5: 通过 SSE 推送消息到客户端
+        if session_name in sse_queues:
+            await sse_queues[session_name].put({
+                "type": "manual_message",
+                "role": role,
+                "content": content,
+                "timestamp": message.timestamp,
+                "agent_id": message.agent_id,
+                "agent_name": message.agent_name
+            })
+            print(f"✅ SSE 推送人工消息到队列: {session_name}, role={role}")
 
         return {
             "success": True,
             "data": {
-                "message_id": message.id,
                 "timestamp": message.timestamp
             }
         }
@@ -1294,8 +1373,7 @@ async def release_session(session_name: str, request: dict):
 
         # 状态转换为 bot_active
         session_state.transition_status(
-            new_status=SessionStatus.BOT_ACTIVE,
-            operator=agent_id or "system"
+            new_status=SessionStatus.BOT_ACTIVE
         )
 
         # 清除坐席信息
@@ -1313,9 +1391,27 @@ async def release_session(session_name: str, request: dict):
             "timestamp": int(time.time())
         }, ensure_ascii=False))
 
+        # P0-5: 推送状态变化和系统消息到 SSE
+        if session_name in sse_queues:
+            # 推送系统消息
+            await sse_queues[session_name].put({
+                "type": "manual_message",
+                "role": "system",
+                "content": "人工服务已结束，AI 助手已接管对话",
+                "timestamp": system_message.timestamp
+            })
+            # 推送状态变化
+            await sse_queues[session_name].put({
+                "type": "status_change",
+                "status": session_state.status.value,
+                "reason": "released",
+                "timestamp": int(time.time())
+            })
+            print(f"✅ SSE 推送会话释放事件: {session_name}")
+
         return {
             "success": True,
-            "data": session_state.to_dict()
+            "data": session_state.model_dump()
         }
 
     except HTTPException:
@@ -1323,6 +1419,186 @@ async def release_session(session_name: str, request: dict):
     except Exception as e:
         print(f"❌ 释放会话失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"释放失败: {str(e)}")
+
+
+@app.post("/api/sessions/{session_name}/takeover")
+async def takeover_session(
+    session_name: str,
+    takeover_request: dict
+):
+    """
+    坐席接入会话（防抢单）
+
+    Body:
+    {
+        "agent_id": "agent_001",
+        "agent_name": "小王"
+    }
+    """
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+    agent_id = takeover_request.get("agent_id")
+    agent_name = takeover_request.get("agent_name")
+
+    if not all([agent_id, agent_name]):
+        raise HTTPException(
+            status_code=400,
+            detail="agent_id and agent_name are required"
+        )
+
+    try:
+        # 🔴 P0-2.1: 获取会话状态
+        session_state = await session_store.get(session_name)
+
+        if not session_state:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # 🔴 P0-2.2: 检查状态是否为pending_manual
+        if session_state.status != SessionStatus.PENDING_MANUAL:
+            if session_state.status == SessionStatus.MANUAL_LIVE:
+                # 已被其他坐席接入
+                assigned_agent_name = session_state.assigned_agent.name if session_state.assigned_agent else "未知"
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"ALREADY_TAKEN: 会话已被坐席【{assigned_agent_name}】接入"
+                )
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"INVALID_STATUS: 当前状态为{session_state.status.value}，无法接入"
+                )
+
+        # 🔴 P0-2.3: 分配坐席
+        from src.session_state import AgentInfo
+        session_state.assigned_agent = AgentInfo(
+            id=agent_id,
+            name=agent_name
+        )
+
+        # 🔴 P0-2.4: 状态转换为manual_live
+        success = session_state.transition_status(
+            new_status=SessionStatus.MANUAL_LIVE
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="状态转换失败"
+            )
+
+        # 🔴 P0-2.5: 添加系统消息
+        system_message = Message(
+            role="system",
+            content=f"客服【{agent_name}】已接入，正在为您服务"
+        )
+        session_state.add_message(system_message)
+
+        # 🔴 P0-2.6: 保存会话状态
+        await session_store.save(session_state)
+
+        # 🔴 P0-2.7: 记录日志
+        print(json.dumps({
+            "event": "agent_takeover",
+            "session_name": session_name,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "timestamp": int(time.time())
+        }, ensure_ascii=False))
+
+        # 🔴 P0-2.8: 推送SSE事件
+        if session_name in sse_queues:
+            # 推送状态变化
+            await sse_queues[session_name].put({
+                "type": "status_change",
+                "status": "manual_live",
+                "agent_info": {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name
+                },
+                "timestamp": int(time.time())
+            })
+
+            # 推送系统消息
+            await sse_queues[session_name].put({
+                "type": "manual_message",
+                "role": "system",
+                "content": f"客服【{agent_name}】已接入，正在为您服务",
+                "timestamp": system_message.timestamp
+            })
+
+            print(f"✅ SSE 推送坐席接入事件: {session_name}")
+
+        return {
+            "success": True,
+            "data": session_state.model_dump()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 接入会话失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"接入失败: {str(e)}")
+
+
+@app.get("/api/sessions")
+async def get_sessions(
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    获取会话列表
+
+    Query Parameters:
+      - status: 会话状态过滤（pending_manual, manual_live等）
+      - limit: 每页数量（默认50）
+      - offset: 偏移量（默认0）
+    """
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+    try:
+        # 🔴 P0-3.1: 按状态查询
+        if status:
+            try:
+                status_enum = SessionStatus(status)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid status: {status}. Valid values: {[s.value for s in SessionStatus]}"
+                )
+
+            sessions = await session_store.list_by_status(
+                status=status_enum,
+                limit=limit,
+                offset=offset
+            )
+            total = await session_store.count_by_status(status_enum)
+        else:
+            # 🔴 P0-3.2: 获取所有会话
+            sessions = await session_store.list_all(limit=limit, offset=offset)
+            total = await session_store.count_all()
+
+        # 🔴 P0-3.3: 转换为摘要格式
+        sessions_summary = [session.to_summary() for session in sessions]
+
+        return {
+            "success": True,
+            "data": {
+                "sessions": sessions_summary,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + len(sessions)) < total
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取会话列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
 if __name__ == "__main__":
@@ -1340,6 +1616,7 @@ if __name__ == "__main__":
     📊 交互式文档: http://{host}:{port}/redoc
     🔐 鉴权模式: {os.getenv("COZE_AUTH_MODE", "OAUTH_JWT")}
     💬 多轮对话: 已启用
+    🔧 人工接管: 已启用
     ==========================================
     """)
 
