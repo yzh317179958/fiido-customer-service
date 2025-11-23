@@ -1,5 +1,61 @@
 # Fiido 智能客服系统
 
+## 项目概述
+
+一套完整的企业级智能客服解决方案，支持 **AI 自动应答 + 人工接管** 双模式。适用于电商独立站、SaaS 平台等需要客服支持的场景。
+
+### 核心能力
+
+- **AI 智能对话** - 基于 Coze Workflow，支持多轮对话和上下文理解
+- **人工无缝接管** - AI 无法解决时自动/手动转人工，支持会话转接
+- **实时消息推送** - SSE 长连接，坐席消息即时送达
+- **完整状态管理** - 5 种会话状态，支持服务闭环
+- **坐席工作台** - 独立的坐席管理系统，支持多坐席协作
+
+### 技术栈
+
+| 模块 | 技术 |
+|------|------|
+| 后端 | FastAPI + Python 3.10+ |
+| 前端 | Vue 3 + TypeScript + Pinia |
+| AI 引擎 | Coze Workflow API |
+| 鉴权 | OAuth 2.0 + JWT |
+| 实时通信 | Server-Sent Events (SSE) |
+
+### 系统架构
+
+```
+用户浏览器 ←→ Vue前端 ←→ FastAPI后端 ←→ Coze AI
+                              ↓
+                        坐席工作台 (Vue)
+```
+
+### 会话状态流转
+
+```
+bot_active → pending_manual → manual_live → bot_active
+   (AI服务)    (等待人工)      (人工服务)    (恢复AI)
+```
+
+### 适用场景
+
+- 电商独立站客服
+- SaaS 产品技术支持
+- 在线咨询服务
+- 售前/售后服务中心
+
+---
+
+## 当前版本: v2.3.0
+
+**功能完成度**: 90% (P0+P1+P3 已完成)
+
+**PRD 文档**: 见 `prd/INDEX.md` (20个需求文档，按6个分类组织)
+
+**下一步**: 企业级部署 (Redis持久化、坐席认证、HTTPS、嵌入SDK)
+
+---
+
 基于 Coze 对话流的智能客服系统，支持 OAuth+JWT 鉴权、完美的会话隔离和 Vue 3 前端。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org)
