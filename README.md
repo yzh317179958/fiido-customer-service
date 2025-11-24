@@ -930,9 +930,9 @@ docs/
 - ✅ 局域网访问 - 支持多设备访问
 
 **GitHub**:
-- Commit: (待生成)
+- Commit: `b4b90d2`
 - Tag: `v2.3.4`
-- Files: 文档整理，32 个文件移动/归档
+- Files: 41 files changed, 2011 insertions(+), 18 deletions(-)
 
 ---
 
