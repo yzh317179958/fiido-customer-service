@@ -1461,8 +1461,251 @@ const exists = chatStore.messages.some(m => m.id === msg.id)
 
 ---
 
+### 约束16: 生产环境安全性与稳定性要求 ⭐ **强制执行**
+
+**发现日期**: 2025-11-24
+**适用范围**: 所有新功能开发、工具使用、环境配置
+
+**核心原则**:
+
+开发任何功能、使用任何工具、配置任何环境时，**必须考虑生产环境的安全性、稳定性及风险**。
+
+#### 16.1 资源管理与限制
+
+**问题场景**:
+```
+AI 客服系统在生产环境运行时：
+- Redis 存储会话数据 → 存储量不断增加 → 最终占满磁盘或内存
+- 日志文件持续写入 → 磁盘空间耗尽
+- 数据库连接池未限制 → 连接数耗尽
+- 内存泄漏 → 服务器崩溃
+```
+
+**强制要求**:
+
+1. **存储限制**
+```python
+# ✅ 正确 - Redis 必须设置内存限制和过期策略
+# redis.conf 配置
+maxmemory 512mb                    # 设置最大内存
+maxmemory-policy allkeys-lru       # 内存满时删除最少使用的key
+
+# ✅ 正确 - 所有会话数据必须设置 TTL
+redis.setex("session:abc123", 86400, json_data)  # 24小时过期
+
+# ❌ 错误 - 未设置过期时间，数据永久保留
+redis.set("session:abc123", json_data)
+```
+
+2. **日志管理**
+```python
+# ✅ 正确 - 使用日志轮转
+logging.handlers.RotatingFileHandler(
+    filename='app.log',
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5           # 保留5个备份
+)
+
+# ❌ 错误 - 日志无限增长
+logging.basicConfig(filename='app.log')
+```
+
+3. **数据库连接池**
+```python
+# ✅ 正确 - 限制连接数
+redis_pool = redis.ConnectionPool(
+    max_connections=50,     # 最大连接数
+    socket_timeout=5,       # 超时设置
+    socket_connect_timeout=5
+)
+
+# ❌ 错误 - 无限制创建连接
+redis_client = redis.Redis(host='localhost')
+```
+
+#### 16.2 数据清理策略
+
+**强制要求**:
+
+1. **定期清理过期数据**
+```python
+# ✅ 正确 - 实现定时清理任务
+async def cleanup_expired_sessions():
+    """清理超过7天未活跃的会话"""
+    threshold = time.time() - 7*24*3600
+
+    for key in redis.scan_iter("session:*"):
+        session = await get_session(key)
+        if session.updated_at < threshold:
+            redis.delete(key)
+
+# 每天凌晨3点执行
+schedule.every().day.at("03:00").do(cleanup_expired_sessions)
+```
+
+2. **监控存储使用量**
+```python
+# ✅ 正确 - 监控 Redis 内存使用
+def check_redis_memory():
+    info = redis.info('memory')
+    used_memory_mb = info['used_memory'] / 1024 / 1024
+
+    if used_memory_mb > 450:  # 超过450MB告警
+        logger.warning(f"Redis memory high: {used_memory_mb}MB")
+        send_alert("Redis内存使用率超过90%")
+```
+
+#### 16.3 错误处理与降级
+
+**强制要求**:
+
+1. **外部依赖失败不影响核心功能**
+```python
+# ✅ 正确 - Redis 不可用时降级到内存存储
+try:
+    session_store = RedisSessionStore(REDIS_URL)
+    logger.info("✅ 使用 Redis 存储")
+except Exception as e:
+    logger.error(f"❌ Redis 连接失败: {e}")
+    session_store = InMemorySessionStore()
+    logger.warning("⚠️ 降级到内存存储（仅开发环境）")
+
+# ❌ 错误 - Redis 失败导致服务无法启动
+session_store = RedisSessionStore(REDIS_URL)  # 连接失败直接崩溃
+```
+
+2. **超时保护**
+```python
+# ✅ 正确 - 所有外部调用必须设置超时
+response = await http_client.post(
+    url,
+    json=data,
+    timeout=10.0  # 10秒超时
+)
+
+# ❌ 错误 - 无超时限制，可能永久阻塞
+response = await http_client.post(url, json=data)
+```
+
+#### 16.4 安全性要求
+
+**强制要求**:
+
+1. **敏感信息保护**
+```python
+# ✅ 正确 - 日志脱敏
+logger.info(f"用户登录: {user_id[:8]}***")
+
+# ❌ 错误 - 记录完整敏感信息
+logger.info(f"用户密码: {password}")
+```
+
+2. **环境变量隔离**
+```bash
+# ✅ 正确 - 生产环境使用环境变量
+REDIS_PASSWORD=your_strong_password
+REDIS_URL=redis://:${REDIS_PASSWORD}@prod-redis:6379/0
+
+# ❌ 错误 - 硬编码密码
+REDIS_URL=redis://:password123@localhost:6379/0
+```
+
+3. **输入验证**
+```python
+# ✅ 正确 - 验证和限制输入大小
+if len(message) > 10000:  # 限制消息长度
+    raise HTTPException(400, "消息过长")
+
+# ❌ 错误 - 未限制输入，可能被攻击
+redis.set(f"session:{user_input}", data)  # user_input 可能包含恶意内容
+```
+
+#### 16.5 监控与告警
+
+**强制要求**:
+
+1. **关键指标监控**
+```python
+# ✅ 正确 - 记录关键性能指标
+@app.middleware("http")
+async def log_request_time(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+
+    if duration > 5.0:  # 超过5秒告警
+        logger.warning(f"慢请求: {request.url.path} 耗时 {duration:.2f}s")
+
+    return response
+```
+
+2. **健康检查端点**
+```python
+# ✅ 正确 - 实现完整的健康检查
+@app.get("/api/health")
+async def health_check():
+    checks = {
+        "redis": check_redis_connection(),
+        "disk_space": check_disk_space(),
+        "memory": check_memory_usage()
+    }
+
+    if all(checks.values()):
+        return {"status": "healthy", "checks": checks}
+    else:
+        raise HTTPException(503, {"status": "unhealthy", "checks": checks})
+```
+
+#### 16.6 生产环境检查清单
+
+**每个新功能开发完成后，必须验证**:
+
+- [ ] 是否设置了资源限制（内存、磁盘、连接数）？
+- [ ] 是否实现了数据过期和清理策略？
+- [ ] 是否有错误降级方案？
+- [ ] 是否设置了超时保护？
+- [ ] 敏感信息是否已脱敏？
+- [ ] 是否添加了监控和告警？
+- [ ] 是否进行了压力测试？
+- [ ] 是否编写了运维文档？
+
+**验证方式**:
+
+```bash
+# 1. 压力测试 - 模拟1000个并发用户
+ab -n 10000 -c 1000 http://localhost:8000/api/chat
+
+# 2. 监控资源使用
+watch -n 1 'redis-cli INFO memory | grep used_memory_human'
+watch -n 1 'df -h | grep /var'
+
+# 3. 检查日志大小
+du -sh /var/log/app.log
+
+# 4. 验证降级功能
+# 停止 Redis，确认系统仍能正常启动（降级到内存存储）
+```
+
+---
+
+**适用场景**:
+- ✅ Redis 数据持久化 - 必须设置 maxmemory、TTL、清理策略
+- ✅ 日志记录 - 必须使用日志轮转
+- ✅ 文件上传 - 必须限制大小和类型
+- ✅ 第三方 API 调用 - 必须设置超时和重试
+- ✅ 数据库操作 - 必须使用连接池和索引
+- ✅ 所有新功能 - 必须通过生产环境检查清单
+
+**违反后果**:
+- 🔴 生产环境磁盘/内存耗尽
+- 🔴 服务崩溃或不可用
+- 🔴 数据泄露或安全事故
+- 🔴 无法诊断和恢复故障
+
+---
+
 **文档维护者**: Claude Code
-**最后更新**: 2025-11-23
-**文档版本**: v1.5 ⭐ 新增 P1-2 历史回填约束 (约束15)
+**最后更新**: 2025-11-24
+**文档版本**: v1.6 ⭐ 新增生产环境安全性与稳定性约束 (约束16)
 **审核状态**: ✅ 已完成
 **验证状态**: ✅ 生产可用 (12/12 测试通过)

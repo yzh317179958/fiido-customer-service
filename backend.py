@@ -41,6 +41,7 @@ from src.session_state import (
     Message,
     EscalationInfo
 )
+from src.redis_session_store import RedisSessionStore  # Redis 存储实现
 from src.regulator import Regulator, RegulatorConfig
 from src.shift_config import get_shift_config, is_in_shift
 from src.email_service import get_email_service, send_escalation_email
@@ -129,12 +130,50 @@ async def lifespan(app: FastAPI):
     print(f"🔄 Workflow ID: {WORKFLOW_ID}")
     print(f"💬 多轮对话: 已启用")
 
-    # 初始化 SessionState 存储（P0）
+    # 初始化 SessionState 存储（P0 + Redis 数据持久化）
+    # 约束16.3.1 - Redis 不可用时降级到内存存储
     try:
-        session_store = InMemorySessionStore()
-        print(f"✅ SessionState 存储初始化成功")
+        # 读取 Redis 配置
+        USE_REDIS = os.getenv("USE_REDIS", "true").lower() == "true"
+        REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))
+        REDIS_TIMEOUT = float(os.getenv("REDIS_TIMEOUT", "5.0"))
+        REDIS_SESSION_TTL = int(os.getenv("REDIS_SESSION_TTL", "86400"))  # 24小时
+
+        if USE_REDIS:
+            try:
+                session_store = RedisSessionStore(
+                    redis_url=REDIS_URL,
+                    max_connections=REDIS_MAX_CONNECTIONS,
+                    socket_timeout=REDIS_TIMEOUT,
+                    socket_connect_timeout=REDIS_TIMEOUT,
+                    default_ttl=REDIS_SESSION_TTL
+                )
+                print(f"✅ 使用 Redis 存储")
+                print(f"   URL: {REDIS_URL}")
+                print(f"   连接池: {REDIS_MAX_CONNECTIONS}")
+                print(f"   TTL: {REDIS_SESSION_TTL}s ({REDIS_SESSION_TTL/3600}h)")
+
+                # 健康检查
+                health = session_store.check_health()
+                if health.get("status") == "healthy":
+                    print(f"   内存: {health['used_memory_mb']}MB / {health['max_memory_mb']}")
+                    print(f"   会话数: {health['total_sessions']}")
+                else:
+                    print(f"   ⚠️ 健康检查异常: {health.get('error')}")
+
+            except Exception as redis_error:
+                print(f"❌ Redis 连接失败: {redis_error}")
+                print(f"⚠️  降级到内存存储（生产环境不推荐）")
+                session_store = InMemorySessionStore()
+        else:
+            session_store = InMemorySessionStore()
+            print(f"⚠️ 使用内存存储（开发/测试环境）")
+
     except Exception as e:
-        print(f"⚠️  SessionState 存储初始化失败: {str(e)}")
+        print(f"❌ SessionState 存储初始化失败: {str(e)}")
+        print(f"⚠️  降级到内存存储")
+        session_store = InMemorySessionStore()
 
     # 初始化 Regulator 监管引擎（P0）
     try:

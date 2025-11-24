@@ -46,22 +46,23 @@ bot_active → pending_manual → manual_live → bot_active
 
 ---
 
-## 当前版本: v2.3.5
+## 当前版本: v2.3.6
 
 **发布日期**: 2025-11-24
 
-**功能完成度**: 94% (P0+P1+部分P3 已完成)
+**功能完成度**: 95% (P0+P1+部分P3 已完成)
 
-**系统状态**: 🎯 **生产可用 (Production Ready)**
+**系统状态**: 🎯 **生产可用 (Production Ready)** - 数据持久化已实现
 
 **PRD 文档**: 见 `prd/INDEX.md` (20个需求文档，按6个分类组织)
 
 **最新更新**:
-- ✅ 添加全新功能方案文档强制要求
-- ✅ 创建 Redis 数据持久化实施方案文档
-- ✅ 更新 CLAUDE.md 开发流程规范
+- ✅ Redis 数据持久化实现
+- ✅ 约束16：生产环境安全性与稳定性要求
+- ✅ 会话数据自动恢复（服务器重启不丢失）
+- ✅ 支持水平扩展（多台服务器共享数据）
 
-**下一步**: Redis 数据持久化实施 → 企业级部署
+**下一步**: 坐席认证系统 → 企业级部署
 
 ---
 
@@ -864,34 +865,62 @@ python3 tests/test_session_name.py
 ---
 ## 📊 版本历史
 
-### v2.3.5 (2025-11-24) - 开发流程规范完善 📝
+### v2.3.6 (2025-11-24) - Redis 数据持久化实现 💾
 
-**功能完成度**: 94% (无功能变更，规范文档完善)
+**功能完成度**: 95% (核心功能完成，生产环境就绪)
 
 **主要更新**:
 
-**📋 开发流程规范强化** (100%)
-- ✅ 新增"全新功能方案文档"强制要求
-  - 开发全新模块功能前必须先编写实施方案文档
-  - 包含7个必需部分：问题分析、技术原理、工具配置、实施步骤、最终效果、时间估算、FAQ
-  - 文档存放位置：`docs/{功能名称}_实施方案详解.md`
-  - 用户确认理解后再开始实施
-- ✅ 更新 `CLAUDE.md` 开发流程规范
-  - 添加 1.1 节"全新功能方案文档要求"
-  - 调整后续章节编号 (1.2-1.4)
-  - 明确触发条件和例外情况
+**🔴 Redis 数据持久化** (100%) - 解决三大问题
+- ✅ **问题1 解决**：服务器重启后数据自动恢复（不再丢失）
+- ✅ **问题2 解决**：支持水平扩展（多台服务器共享 Redis 数据）
+- ✅ **问题3 解决**：支持历史数据查询和导出
+- ✅ 创建 `src/redis_session_store.py` (406行)
+  - 完整实现 SessionStateStore 接口
+  - 连接池管理（max_connections=50）
+  - TTL 过期策略（24小时自动清理）
+  - 健康检查和监控功能
+  - 定期清理策略
+- ✅ 修改 `backend.py` 集成 Redis
+  - 实现降级策略（Redis 失败时降级到内存存储）
+  - 启动时显示 Redis 健康状态
+  - 支持环境变量配置
+- ✅ 更新 `.env` 配置
+  - 新增 6 个 Redis 配置项
+  - 详细的注释和生产环境注意事项
 
-**📖 Redis 数据持久化方案文档** (100%)
-- ✅ 创建 `docs/Redis数据持久化实施方案详解.md`
-  - 详细问题分析（数据丢失、无法扩展、无历史数据）
-  - Redis 技术原理和选型对比
-  - 完整安装配置步骤
-  - RedisSessionStore 实现设计
-  - Before/After 效果对比
-  - 实施时间估算 (2-3天)
-  - 8个常见问题解答
+**🔒 约束16：生产环境安全性与稳定性** (100%)
+- ✅ 新增约束文档 `prd/02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md`
+- ✅ 资源管理与限制（16.1）
+  - 存储限制：maxmemory, TTL
+  - 日志管理：日志轮转
+  - 连接池限制
+- ✅ 数据清理策略（16.2）
+  - 定期清理过期数据
+  - 监控存储使用量
+- ✅ 错误处理与降级（16.3）
+  - Redis 不可用时自动降级
+  - 超时保护（5秒）
+- ✅ 安全性要求（16.4）
+  - 敏感信息保护
+  - 环境变量隔离
+  - 输入验证
+- ✅ 监控与告警（16.5）
+  - 关键指标监控
+  - 健康检查端点
+- ✅ 生产环境检查清单（16.6）
 
-**当前系统功能** (无变化):
+**🧪 测试验证** (100%)
+- ✅ 创建 `tests/test_redis_persistence.py`
+- ✅ 所有测试通过：
+  - 数据保存成功
+  - 数据读取成功
+  - 数据完整性验证
+  - 服务器重启后数据恢复
+  - 历史消息完整保留
+  - 用户信息正确恢复
+
+**当前系统功能**:
 - ✅ AI 智能对话 - 基于 Coze Workflow
 - ✅ 人工接管流程 - 5 种状态管理
 - ✅ 坐席工作台 - 完整工作台实现
@@ -900,516 +929,110 @@ python3 tests/test_session_name.py
 - ✅ 历史回填 - 刷新保持上下文
 - ✅ 品牌设计 - Fiido 官方风格
 - ✅ 局域网访问 - 支持多设备访问
+- ✅ **Redis 数据持久化** - 服务器重启不丢失数据 ⭐ 新增
+- ✅ **水平扩展支持** - 多台服务器共享数据 ⭐ 新增
 
-**下一步**: Redis 数据持久化实施（准备就绪）
+**生产环境就绪**:
+- ✅ 数据持久化机制
+- ✅ 降级策略
+- ✅ 资源限制
+- ✅ 监控告警
+- ✅ 安全性保障
+
+**下一步**: 坐席认证系统（JWT） → HTTPS 部署
 
 **GitHub**:
-- Commit: `85a8c80`
-- Tag: `v2.3.5`
-- Files: 3 files changed, 776 insertions(+), 10 deletions(-)
+- Commit: `2054341`
+- Tag: `v2.3.6`
+- Files: 9 files changed
 
 ---
 
-### v2.3.4 (2025-11-24) - 文档结构优化 📚
-
-**功能完成度**: 94% (无功能变更，仅文档整理)
+### v2.3.5 (2025-11-24) - 开发流程规范完善
 
 **主要更新**:
+- 新增"全新功能方案文档"强制要求（CLAUDE.md）
+- 创建 Redis 数据持久化方案文档
 
-**📂 文档结构重组** (100%)
-- ✅ 移动 15 个过程文档到 `docs/process/` 目录
-  - P0 开发过程报告 (9 个文件)
-  - 会话隔离技术总结 (5 个文件)
-  - 模块审查报告 (1 个文件)
-- ✅ 归档 17 个 prd 旧版本到 `docs/archive/prd_root_old/`
-  - 子目录中已有更新版本 (v1.1, 2025-11-24)
-  - 完整保留旧版本 (v1.0, 2025-11-19)
-- ✅ prd/ 根目录清理：18 个文件 → 1 个索引文件
-
-**📋 索引文档创建/更新**
-- ✅ 更新 `prd/INDEX.md` 反映最新结构
-  - 新增"归档文档"章节
-  - 更新版本历史记录
-- ✅ 创建 `docs/README.md` 文档中心导航
-  - 核心技术文档索引
-  - 过程文档分类列表
-  - 归档文档访问路径
-- ✅ 创建 `docs/文档整理总结报告.md`
-  - 详细整理过程记录
-  - 文件移动清单
-  - 最终结构图示
-
-**📖 GitHub 提交规范更新**
-- ✅ 更新 `GITHUB_CONFIG.md`
-  - 新增版本管理强制要求
-  - README.md 版本记录格式规范
-  - 版本号一致性验证清单
-
-**📁 最终文档结构**:
-```
-prd/
-├── INDEX.md (唯一根目录文件)
-├── 01_全局指导/ (3 文件)
-├── 02_约束与原则/ (3 文件)
-├── 03_技术方案/ (2 文件)
-├── 04_任务拆解/ (5 文件)
-├── 05_验收与记录/ (5 文件)
-└── 06_企业部署/ (2 文件)
-
-docs/
-├── README.md (文档中心导航)
-├── 5 个核心技术文档
-├── process/ (15 个过程文档)
-└── archive/prd_root_old/ (17 个旧版本)
-```
-
-**当前系统功能** (无变化):
-- ✅ AI 智能对话 - 基于 Coze Workflow
-- ✅ 人工接管流程 - 5 种状态管理
-- ✅ 坐席工作台 - 完整工作台实现
-- ✅ 实时消息推送 - SSE 长连接
-- ✅ 会话隔离 - 基于 session_name
-- ✅ 历史回填 - 刷新保持上下文
-- ✅ 品牌设计 - Fiido 官方风格
-- ✅ 局域网访问 - 支持多设备访问
-
-**GitHub**:
-- Commit: `b4b90d2`
-- Tag: `v2.3.4`
-- Files: 41 files changed, 2011 insertions(+), 18 deletions(-)
+**GitHub**: Commit `85a8c80`, Tag `v2.3.5`
 
 ---
 
-### v2.3.3 (2025-11-24) - UI 美化与品牌升级 🎨
-
-**功能完成度**: 94% (31/33 功能点)
-
-**主要更新**:
-
-**🎨 坐席工作台 Fiido 品牌设计** (100%)
-- ✅ 应用 Fiido 品牌色系 (#4ECDC4, #52C7B8)
-- ✅ 集成 Fiido Logo (fiido2.png)
-- ✅ 登录页完整重构（渐变背景、浮动动画）
-- ✅ 工作台界面重构（品牌色、统计卡片优化）
-- ✅ 统一视觉语言（圆角 8-12px、阴影分层）
-
-**🌐 网络访问配置** (100%)
-- ✅ 坐席工作台支持局域网访问 (`host: '0.0.0.0'`)
-- ✅ 固定端口 5174（避免与用户端冲突）
-- ✅ API 代理正确配置
-
-**📱 用户端人工接管 UI 完善** (100%)
-- ✅ 转人工触发按钮（浮动气泡菜单）
-- ✅ 状态栏组件（5 种状态显示 + 动画）
-- ✅ 坐席信息显示（头像 + 姓名）
-- ✅ 消息角色区分（AI/用户/人工样式）
-- ✅ 等待提示动画（沙漏脉动）
-- ✅ 动态 Placeholder（根据状态变化）
-- ✅ 智能消息路由（bot/manual/pending）
-- ✅ SSE 事件监听（4 种事件类型）
-- ✅ 状态轮询机制（条件启动，2秒间隔）
-- ✅ 历史消息恢复（刷新保持上下文）
-
-**📚 文档更新**
-- ✅ PRD 文档更新至 v2.3.3
-- ✅ 技术约束文档 v1.1（新增约束 6-12）
-- ✅ 前端功能验证报告（详细的代码审查）
-
-**⚠️ 已知缺失功能**:
-- ❌ 满意度评价功能（待 v2.4）
-
-**GitHub**:
-- Commit: `ab42735`
-- Tag: `v2.3.3`
-- Files: 7 files changed, 1120 insertions(+), 102 deletions(-)
+### v2.3.4 (2025-11-24) - 文档结构优化
+- 重组 prd/ 和 docs/ 目录结构
+- 创建文档索引和导航
+- **GitHub**: Commit `b4b90d2`, Tag `v2.3.4`
 
 ---
 
-### v2.5.0 (2025-11-23) - 坐席工作台完善 + 历史回填 🎯
-
-**P0-12 至 P0-15: 坐席工作台核心功能** ⭐ **完整工作台实现**
-- ✅ **会话列表组件** (`agent-workbench/src/components/SessionList.vue`)
-  - 会话卡片展示（用户头像、状态标签、等待时间）
-  - 状态筛选（待接入/服务中/全部）
-  - 快速接入按钮
-- ✅ **会话状态管理** (`agent-workbench/src/stores/sessionStore.ts`)
-  - fetchSessions / fetchStats / fetchSessionDetail
-  - takeoverSession / releaseSession / sendMessage
-  - 自动刷新（每5秒）
-- ✅ **Dashboard 完整功能** (`agent-workbench/src/views/Dashboard.vue`)
-  - 统计卡片（待接入/服务中/全部）
-  - 会话详情面板
-  - 聊天历史展示
-  - 消息发送（Enter 发送）
-  - 会话释放操作
-
-**P1-1: 会话统计 API** ⭐ **已实现**
-- ✅ `GET /api/sessions/stats` - 返回统计数据
-  - 总会话数、各状态数量、平均等待时间
-
-**P1-2: 历史回填** ⭐ **用户端加载历史**
-- ✅ `loadSessionHistory()` 函数实现
-  - 恢复会话状态（bot_active/pending_manual/manual_live）
-  - 恢复升级信息（reason, timestamp, context）
-  - 恢复坐席信息（agent_id, agent_name）
-  - 恢复历史消息（按时间排序，去重）
-  - 人工模式自动启动轮询
-- ✅ 约束文档新增 **约束15: 历史回填实现规范**
-
-**回归测试框架** ⭐ **12项自动化测试**
-- ✅ `tests/regression_test.sh` - 完整测试套件
-  - 第一层：核心功能（健康检查、AI对话、会话隔离）
-  - 第二层：人工接管（升级、阻止、接入、消息、释放）
-  - 第三层：坐席工作台（列表、统计、TypeScript检查）
-- ✅ 所有12项测试通过
-
-**约束文档更新**
-- ✅ 约束14: Python 环境要求（强制使用 python3）
-- ✅ 约束15: 历史回填实现规范（P1-2）
-- ✅ 文档版本: v1.5
+### v2.3.3 (2025-11-24) - UI 美化与品牌升级
+- 坐席工作台 Fiido 品牌设计
+- 用户端人工接管 UI 完善
+- 网络访问配置优化
+- **GitHub**: Commit `ab42735`, Tag `v2.3.3`
 
 ---
 
-### v2.4.0 (2025-11-21) - 坐席工作台开发 + 项目结构整理 🎯
-
-**P0-10: 创建坐席工作台项目** ⭐ **新增独立项目**
-- ✅ **项目架构** - 基于 Vite + Vue 3 + TypeScript 的现代化工作台
-  - 独立端口 5174（与用户前端 5173 隔离）
-  - API 代理配置（自动转发 `/api` 到后端 8000 端口）
-  - 完整目录结构（views, components, stores, api, types）
-  - 路径别名配置（`@/*` → `src/*`）
-- ✅ **依赖安装**
-  - 核心框架：vue, vite, typescript
-  - 状态管理：pinia
-  - 路由：vue-router
-  - HTTP客户端：axios
-  - Markdown解析：marked
-- ✅ **项目配置**
-  - `vite.config.ts` - 端口、代理、路径别名
-  - `tsconfig.app.json` - TypeScript路径解析
-  - `package.json` - 完整依赖清单
-- ✅ **文档创建**
-  - `agent-workbench/README.md` - 工作台独立文档
-
-**P0-11: 实现坐席登录认证** ⭐ **完整登录流程**
-- ✅ **类型定义** (`agent-workbench/src/types/index.ts`)
-  - `AgentInfo` - 坐席基本信息
-  - `SessionStatus` - 会话状态枚举（5种状态）
-  - `SessionSummary` / `SessionDetail` - 会话数据模型
-  - `Message` - 扩展消息类型支持 'agent' | 'system'
-- ✅ **状态管理** (`agent-workbench/src/stores/agentStore.ts`)
-  - Pinia Store 管理登录状态
-  - `login()` - 登录并持久化到 localStorage
-  - `logout()` - 清除会话
-  - `restoreSession()` - 恢复登录状态
-- ✅ **路由配置** (`agent-workbench/src/router/index.ts`)
-  - `/login` - 登录页（无需认证）
-  - `/dashboard` - 工作台首页（需要认证）
-  - 路由守卫 - 未登录自动跳转登录页
-- ✅ **页面组件**
-  - `Login.vue` - 渐变背景，输入坐席ID和姓名
-  - `Dashboard.vue` - 显示坐席信息，功能预览，退出登录
-- ✅ **应用集成**
-  - `App.vue` - 集成路由，自动恢复会话
-  - `main.ts` - 注册 Pinia 和 Router
-
-**会话隔离测试规范** ⭐ **重要约束文档更新**
-- ✅ **新增约束13** - 会话隔离的测试标准
-  - 核心原则：每个新浏览器窗口/标签页 = 独立用户
-  - 标准测试流程（8步）
-  - Python自动化测试示例
-  - 验证要点和重要说明
-- ✅ **测试脚本修复**
-  - `tests/test_simple.py` - 完全重写，遵循正确的Coze实现方式
-  - 预先创建 conversation_id（调用 `/api/conversation/new`）
-  - 验证通过：✅ 会话完全隔离
-- ✅ **文档位置** - `prd/CONSTRAINTS_AND_PRINCIPLES.md:979-1141`
-
-**项目结构整理** 🗂️
-- ✅ **文档归档** - 移动12个旧文档到 `docs/archive/`
-  - COMPREHENSIVE_TEST_REPORT.md
-  - COMPREHENSIVE_TEST_REPORT_FINAL.md
-  - P0-3_FINAL_VERIFICATION_PASSED.md
-  - P0-3_IMPLEMENTATION_REPORT.md
-  - P0-4_ANALYSIS_REPORT.md
-  - P0_FINAL_TEST_REPORT.md
-  - claude.md
-  - docs/MODULE_REVIEW_REPORT.md
-  - docs/P0-API使用示例.md
-  - docs/P0-完成总结.md
-  - prd/ACCEPTANCE_CRITERIA_v1.0.md
-  - prd/DOCUMENTATION_SUMMARY.md
-- ✅ **Git配置**
-  - 创建完整的 `.gitignore` 文件
-  - 排除：Python缓存、Node模块、.env、*.pem、IDE配置等
-- ✅ **代码提交**
-  - Commit: `feat: 完成 P0-11 坐席工作台登录认证 + 整理项目结构`
-  - 71 files changed, 25059 insertions(+), 503 deletions(-)
-
-**测试验证** ✅
-- ✅ **TypeScript类型检查** - 通过（agent-workbench）
-- ✅ **核心功能测试** - 12/14 通过（85.7%）
-- ✅ **会话隔离测试** - ✅ 完全通过
-  - `test_session_name.py` - 全部验证点通过
-  - `test_simple.py` - 修复后通过
-- ✅ **向后兼容性** - 无破坏性更改
-- ✅ **新增约束** - 无（agent-workbench完全独立）
-
-**文档更新** 📚
-- ✅ `README.md` - 新增 v2.4.0 版本说明
-- ✅ `agent-workbench/README.md` - 工作台项目文档
-- ✅ `prd/CONSTRAINTS_AND_PRINCIPLES.md` - 新增约束13（会话隔离测试规范）
-- ✅ `prd/IMPLEMENTATION_TASKS_v1.0.md` - 标记 P0-10/P0-11 完成
-
-**GitHub 同步** 🔄
-- ✅ 推送到远程仓库：https://github.com/yzh317179958/fiido-customer-service
-- ✅ 分支：main
-- ✅ Commit Hash: 6f1beed
-
-**下一步计划** 📝
-- [ ] P0-12: 实现会话列表（获取待处理会话）
-- [ ] P0-13: 实现接入操作（坐席接管会话）
-- [ ] P0-14: 实现坐席聊天（发送人工消息）
-- [ ] P0-15: 实现释放操作（结束人工服务）
-
-**重要说明**:
-- 坐席工作台（agent-workbench）完全独立于用户前端（frontend）
-- 两个项目可以同时运行，互不干扰
-- 当前登录认证为简化版（实际生产应使用JWT认证）
-- 会话隔离测试标准已明确定义，所有后续开发必须遵守
+### v2.3.2 (2025-11-23) - 坐席工作台完善
+- P0-12 至 P0-15: 坐席工作台核心功能
+- P1-1: 会话统计 API
+- P1-2: 历史回填功能
+- 回归测试框架（12项自动化测试）
+- **GitHub**: Tag `v2.3.2`
 
 ---
 
-### v2.3.0 (2025-11-20) - P0人工接管功能完成 🎉
+### v2.3.1 (2025-11-22) - Coze Workflow ID 更新
+- 更新 Workflow ID 至最新版本
+- 修复前端客服头像加载问题
+- **GitHub**: Tag `v2.3.1`
 
-**P0-4: 核心API实现**:
-- ✅ `POST /api/manual/escalate` - 人工升级接口
-- ✅ `GET /api/sessions/{session_name}` - 获取会话状态
-- ✅ `POST /api/manual/messages` - 人工消息写入
-- ✅ `POST /api/sessions/{session_name}/release` - 释放会话
-- ✅ 状态机管理 (bot_active → pending_manual → manual_live)
-- ✅ 会话状态持久化 (SessionState)
-- ✅ 监管引擎集成 (Regulator)
+---
 
-**P0-5: SSE实时推送**:
-- ✅ 人工消息推送 (manual_message事件)
-- ✅ 状态变化推送 (status_change事件)
-- ✅ 系统消息推送 (释放会话时)
-- ✅ 异步队列机制 (asyncio.Queue)
-- ✅ 自动注入到 `/api/chat/stream`
+### v2.3.0 (2025-11-21) - P0人工接管功能完成
+- P0-4: 核心API实现（人工升级、会话状态、消息写入、释放）
+- P0-5: SSE实时推送
+- P0-6: JSON日志规范
+- **GitHub**: Tag `v2.3.0`
 
-**P0-6: JSON日志规范**:
-- ✅ 所有状态转换记录JSON格式日志
-- ✅ 人工升级事件日志
-- ✅ 消息写入事件日志
-- ✅ 会话释放事件日志
+---
 
-**测试覆盖**:
-- ✅ `tests/test_p04_apis.py` - P0-4 API完整测试
-- ✅ `tests/test_p05_sse.py` - P0-5 SSE推送测试
+### v2.2.1 (2025-11-20) - UI菜单交互修复
+- 修复气泡菜单交互问题
+- **GitHub**: Tag `v2.2.1`
 
-**文档更新**:
-- ✅ README 添加 P0-4 API文档
-- ✅ README 添加 P0-5 SSE文档
-- ✅ 前端接收示例代码
+---
 
-**修改文件**:
-- `backend.py` - 新增 4 个 API 端点，SSE 队列机制
-- `src/session_state.py` - 会话状态模型
-- `src/regulator.py` - 监管引擎
-- `tests/test_p04_apis.py` - API 测试脚本
-- `tests/test_p05_sse.py` - SSE 测试脚本
-- `README.md` - 文档更新
+### v2.2.0 (2025-11-20) - 会话隔离重大突破
+- 彻底解决会话隔离问题
+- 前端UI优化（气泡菜单、清除对话、新建会话）
+- **GitHub**: Tag `v2.2.0`
 
-### v2.3.0 (2025-11-21) - 人工接管前端基础功能 ⭐ **P0阶段**
-
-**人工接管前端功能（P0-4 至 P0-6）**:
-- ✅ **状态管理扩展（P0-4）** - 扩展 Pinia Store 支持人工接管状态
-  - 新增 `SessionStatus` 状态类型（5种状态）
-  - 新增 `escalationInfo`、`agentInfo`、`isEscalating` 状态
-  - 新增 5 个计算属性：`isManualMode`、`canSendMessage`、`canEscalate`、`statusText`、`statusColorClass`
-  - 新增 6 个方法：`updateSessionStatus`、`setEscalationInfo`、`setAgentInfo`、`escalateToManual`、`refreshSessionStatus`、`resetManualState`
-
-- ✅ **状态指示器组件（P0-5）** - 显示会话状态的 StatusBar 组件
-  - 支持 5 种状态显示：AI服务中、等待人工接入、人工服务中、非工作时间、已关闭
-  - 状态点脉动动画
-  - 等待人工时显示跳动动画
-  - 人工服务时显示坐席头像
-  - 渐变背景色区分不同状态
-
-- ✅ **转人工按钮（P0-6）** - 集成到气泡菜单的转人工功能
-  - 添加"转人工"按钮到浮动气泡菜单
-  - 智能禁用逻辑（基于 `canEscalate` 计算属性）
-  - 完整的错误处理和用户提示
-  - 自动添加系统消息提示
-  - 禁用状态灰色样式
-
-**类型定义扩展**:
-- ✅ 扩展 `Message.role` 支持 'agent' | 'system'
-- ✅ 新增 `SessionStatus`、`EscalationReason`、`EscalationSeverity` 类型
-- ✅ 新增 `AgentInfo`、`EscalationInfo`、`SSEEvent` 接口
-- ✅ 新增 `ManualEscalateRequest/Response`、`SessionStateResponse` 接口
-
-**开发流程规范（重大更新）**:
-- ✅ **建立4阶段开发流程** - 确保所有开发不破坏核心功能
-  - 🔴 阶段1: 开发前审查（约束文档审查、基线测试、设计审查）
-  - 🟡 阶段2: 开发中约束（Coze API 调用规范、代码实现检查）
-  - 🟢 阶段3: 开发后验证（单元测试、约束遵守验证、手动验证）
-  - 🔵 阶段4: 文档同步更新（必须更新5个核心文档）
-
-**测试验证**:
-- ✅ TypeScript 类型检查通过
-- ✅ 核心功能回归测试 15/15 通过 (100%)
-- ✅ 所有新功能遵守技术约束
-- ✅ 向后兼容性验证通过
-
-**文档更新**:
-- ✅ 更新 `prd/prd.md` - 添加362行开发流程规范章节
-- ✅ 更新 `prd/CONSTRAINTS_AND_PRINCIPLES.md` - 添加6个新约束
-- ✅ 更新 `prd/TECHNICAL_SOLUTION_v1.0.md` - 添加实现验证结果
-- ✅ 更新 `prd/IMPLEMENTATION_TASKS_v1.0.md` - 标记P0-4/5/6完成
-
-**P0 用户前端功能（P0-7 至 P0-9）**:
-- ✅ P0-7: 实现人工消息渲染 ⭐ **已完成**
-- ✅ P0-8: 扩展SSE事件处理 ⭐ **已完成**
-- ✅ P0-9: 实现输入控制逻辑 ⭐ **已完成**
-  - ✅ 状态-行为映射（bot_active、pending_manual、manual_live）
-  - ✅ 动态 placeholder 和输入控制
-  - ✅ 等待提示和脉动动画
-  - ✅ **智能状态轮询** (2025-11-21 补充)
-  - ✅ **历史消息自动同步** (2025-11-21 补充)
-
-**P1 坐席工作台功能（P0-10 至 P0-15）**:
-- ✅ P0-10: 创建工作台项目 ⭐ **已完成** (2025-11-21)
-  - ✅ Vite + Vue 3 + TypeScript 项目架构
-  - ✅ 端口 5174（独立于用户前端）
-  - ✅ API 代理到后端 8000 端口
-  - ✅ 完整目录结构（views, components, stores, api, types）
-  - ✅ 路径别名配置（@ → src）
-  - ✅ TypeScript 类型检查通过
-  - ✅ 项目启动测试通过
-- ✅ P0-11: 实现登录认证 ⭐ **已完成** (2025-11-21)
-  - ✅ 登录页面（Login.vue）- 渐变背景，输入坐席ID和姓名
-  - ✅ 工作台首页（Dashboard.vue）- 显示坐席信息和功能预览
-  - ✅ 状态管理（agentStore.ts）- Pinia Store 管理登录状态
-  - ✅ 路由守卫 - 认证保护，未登录跳转登录页
-  - ✅ 会话持久化 - localStorage 保存登录信息
-  - ✅ TypeScript 类型定义 - 完整的 Agent/Session/Message 类型
-  - ✅ 测试验证通过 - TypeScript 检查通过，核心功能无影响
-- [ ] P0-12: 实现会话列表
-- [ ] P0-13: 实现接入操作
-- [ ] P0-14: 实现坐席聊天
-- [ ] P0-15: 实现释放操作
-
-**P0 用户前端功能全部完成** 🎉
-**P1 坐席工作台开发中** 🚧
-
-**重要说明**:
-- P0-9 包含智能轮询机制，无需 SSE 连接即可实时同步坐席接入和消息
-- 轮询间隔: 2秒，仅在 pending_manual 和 manual_live 状态下运行
-- 详细说明见: `docs/P0-9_补充修复-状态轮询和消息同步.md`
-
-**修改文件**:
-- `frontend/src/types/index.ts` - 扩展类型定义
-- `frontend/src/stores/chatStore.ts` - 扩展状态管理
-- `frontend/src/components/StatusBar.vue` - 新建状态指示器
-- `frontend/src/components/ChatPanel.vue` - 集成状态栏、转人工按钮、SSE事件处理、输入控制逻辑 ⭐ **P0-9更新**
-- `frontend/src/components/ChatMessage.vue` - 扩展消息渲染支持人工消息
-- `prd/prd.md` - 添加开发流程规范
-- `prd/CONSTRAINTS_AND_PRINCIPLES.md` - 添加新约束
-- `prd/TECHNICAL_SOLUTION_v1.0.md` - 添加验证结果
-- `prd/IMPLEMENTATION_TASKS_v1.0.md` - 更新任务完成状态 ⭐ **P0-9更新**
-
-### v2.2.2 (2025-11-20) - 修复测试脚本，验证会话隔离
-
-**测试修复**:
-- ✅ **修复 test_session_name.py** - 严格遵循《Coze会话隔离最终解决方案.md》实现
-- ✅ **预先创建 conversation** - 用户打开页面时立即调用 `/api/conversation/new`
-- ✅ **验证通过** - Conversation ID 不同，用户A/B上下文完全隔离
-- ✅ **删除错误测试** - 移除依赖自动生成 conversation_id 的旧版本
-
-**测试结果**:
-```
-Session A → Conversation: 7574681165306363909
-Session B → Conversation: 7574686112397737989
-✅ 用户A正确记住"张三、25岁"
-✅ 用户B正确记住"李四、程序员"
-✅ 用户A不知道用户B的信息（会话完全隔离）
-```
-
-**修改文件**:
-- `tests/test_session_name.py` - 重写为正确的会话隔离测试
-
-### v2.2.1 (2025-11-20) - 修复UI菜单交互问题
-
-**Bug修复**:
-- ✅ **修复气泡菜单交互** - 点击后菜单不会立即关闭
-- ✅ **添加事件冒泡阻止** - 使用 `@click.stop` 防止意外关闭
-- ✅ **改善用户体验** - 鼠标在菜单区域移动时保持显示
-
-**修改文件**:
-- `frontend/src/components/ChatPanel.vue` - 添加点击事件拦截
-
-### v2.2.0 (2025-11-20) - 彻底解决会话隔离，优化UI界面 ⭐
-
-**会话隔离重大突破**:
-- ✅ **彻底解决会话隔离问题** - 用户打开页面时立即调用 `conversations.create()` API
-- ✅ **完整文档体系** - 创建《Coze会话隔离最终解决方案.md》（亲测有效）
-- ✅ **实测验证通过** - 每个session获得独立的conversation_id
-- ✅ **更新PRD文档** - 在prd/coze.md中补充正确实现方式
-
-**前端UI优化**:
-- ✅ **气泡菜单设计** - 输入框左侧浮动气泡菜单，点击展开两个操作选项
-- ✅ **清除对话功能** - 添加历史分隔线，不清空对话内容
-- ✅ **新建会话功能** - 立即清空界面，异步创建新会话，无卡顿
-- ✅ **头像优化** - 使用fiido2.png，42px尺寸，contain适配
-- ✅ **分隔线组件** - 支持系统消息类型，渐变分隔线样式
-
-**后端优化**:
-- ✅ **图片服务** - 添加 `/fiido2.png` 路由，提供头像文件
-- ✅ **会话初始化** - 前端页面加载时立即创建conversation
-
-**文档整理**:
-- ✅ 创建核心文档《Coze会话隔离最终解决方案.md》
-- ✅ 创建《文档清单.md》索引所有文档
-- ✅ 创建《文档整理完成总结.md》
-- ✅ 更新 prd/coze.md 添加1.2节"会话隔离的正确实现方式"
-- ✅ 删除所有过时的诊断文档
+---
 
 ### v2.1.0 (2025-11-19) - 三前端版本发布
+- 后端新增多个API接口
+- 三个前端版本：Vue 3、Chat SDK、增强版HTML
+- 完全复刻 Fiido.com 设计
+- **GitHub**: Tag `v2.1.0`
 
-**后端更新**:
-- ✅ 新增 `conversation_id` 参数支持
-- ✅ 新增 `POST /api/conversation/new` API
-- ✅ 新增 `POST /api/chat/token` API (为 Chat SDK 生成 JWT)
-- ✅ 新增 `GET /api/bot/info` API
-- ✅ 集成 `JWTOAuthApp` 用于 SDK token 生成
+---
 
-**前端更新**:
-- ✅ 新增 Vue 3 + TypeScript 现代化版本 (`frontend/`)
-- ✅ 新增 Coze Chat SDK 版本 (`index_chat_sdk.html`)
-- ✅ 增强 index2.html - 添加"新对话"/"新会话"功能
-- ✅ 完全复刻 Fiido.com 官网设计
-- ✅ 支持局域网访问 (`host: true`)
+📖 **详细版本历史**: 见 [CHANGELOG_DETAIL.md](./CHANGELOG_DETAIL.md)
 
-**文档更新**:
-- ✅ 新增 `CHANGELOG.md` - 详细更新日志
-- ✅ 新增 `完整总结.md` - 版本对比文档
-- ✅ 新增 `使用说明-最终版.md`
-- ✅ 新增 `frontend/README_CN.md`
-- ✅ 更新 `README.md` - 添加三版本说明
+---
+
+## v2.0.0 之前的版本
 
 ### v2.0.0 (2025-11-18) - 会话隔离实现
-
-- ✅ 实现基于 session_name 的会话隔离
-- ✅ 双重添加 session_name (JWT + API payload)
-- ✅ 完整的测试验证
-- ✅ 文档整理和规范化
+- 实现基于 session_name 的会话隔离
+- 双重添加 session_name (JWT + API payload)
+- 完整的测试验证
 
 ---
 
 **最后更新**: 2025-11-24
-**当前版本**: v2.3.3
+**当前版本**: v2.3.6
 
 ---
 

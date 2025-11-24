@@ -28,3 +28,4 @@ cryptography==44.0.0
 # 其他可选依赖
 # aiofiles==24.1.0  # 异步文件操作
 # python-multipart==0.0.20  # 文件上传支持
+redis>=5.0.0
