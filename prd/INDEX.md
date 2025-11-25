@@ -1,6 +1,6 @@
 # Fiido 智能客服系统 - PRD 文档索引
 
-> 版本: v2.3.3 | 更新时间: 2025-11-24
+> 版本: v3.1.0 | 更新时间: 2025-11-25
 
 ## 文档导航
 
@@ -15,7 +15,7 @@
 | 文档 | 说明 | 优先级 |
 |------|------|--------|
 | [prd.md](./01_全局指导/prd.md) | 主PRD文档 - 系统总体需求定义 | ⭐⭐⭐ |
-| [PRD_COMPLETE_v3.0.md](./01_全局指导/PRD_COMPLETE_v3.0.md) | 完整版PRD - 详细功能说明 | ⭐⭐⭐ |
+| [PRD_COMPLETE_v3.0.md](./01_全局指导/PRD_COMPLETE_v3.0.md) | 完整版PRD v3.1 - 详细功能说明（含 Fiido E-bike 业务需求）⭐ 已更新 | ⭐⭐⭐ |
 | [README.md](./01_全局指导/README.md) | 项目概述和快速入门 | ⭐⭐ |
 
 ---
@@ -26,7 +26,7 @@
 
 | 文档 | 说明 | 重要性 |
 |------|------|--------|
-| [CONSTRAINTS_AND_PRINCIPLES.md](./02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md) | 核心约束与开发原则 | 🔴 必读 |
+| [CONSTRAINTS_AND_PRINCIPLES.md](./02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md) | 核心约束与开发原则（含约束17：坐席认证安全性） | 🔴 必读 |
 | [TECHNICAL_CONSTRAINTS.md](./02_约束与原则/TECHNICAL_CONSTRAINTS.md) | 技术约束详细说明 | 🔴 必读 |
 | [coze.md](./02_约束与原则/coze.md) | Coze API 使用约束和规范 | 🟠 重要 |
 
@@ -39,7 +39,7 @@
 | 文档 | 说明 | 用途 |
 |------|------|------|
 | [TECHNICAL_SOLUTION_v1.0.md](./03_技术方案/TECHNICAL_SOLUTION_v1.0.md) | 技术架构方案 | 架构参考 |
-| [api_contract.md](./03_技术方案/api_contract.md) | API 接口契约文档 | 接口开发 |
+| [api_contract.md](./03_技术方案/api_contract.md) | API 接口契约文档 v2.5（含 AI 质量和坐席效率统计）⭐ 已更新 | 接口开发 |
 
 ---
 
@@ -54,6 +54,7 @@
 | [frontend_client_tasks.md](./04_任务拆解/frontend_client_tasks.md) | 用户端前端任务 | Frontend |
 | [agent_workbench_tasks.md](./04_任务拆解/agent_workbench_tasks.md) | 坐席工作台任务 | Agent |
 | [email_and_monitoring_tasks.md](./04_任务拆解/email_and_monitoring_tasks.md) | 邮件和监控任务 | P1 |
+| [admin_management_tasks.md](./04_任务拆解/admin_management_tasks.md) | 管理员功能任务拆解 ⭐ 新增 | Admin |
 
 ---
 
@@ -107,6 +108,8 @@
 | 会话隔离 | 必须使用 session_name 实现 JWT 级别隔离 |
 | 状态机 | bot_active → pending_manual → manual_live → bot_active |
 | 人工接管 | 人工接管期间必须阻止 AI 对话 |
+| 坐席认证 | bcrypt 密码加密 + JWT Token（约束17）⭐ |
+| SSE 实时推送 | 混合策略：轻量级轮询(30s) + SSE(当前会话)（约束18）⭐ 新增 |
 
 ---
 
@@ -114,6 +117,14 @@
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| v3.1.0 | 2025-11-25 | **Fiido E-bike 业务需求整合 v3.1** ⭐ P0 功能完成 |
+|        |            | - UserProfile 扩展（GDPR、多语言、多货币） |
+|        |            | - 统计接口扩展（AI 质量、坐席效率指标） |
+|        |            | - 新增合规性说明文档 |
+|        |            | - 新增 P2 工单系统实施方案 |
+|        |            | - 新增 P2 知识库系统实施方案 |
+| v2.3.9 | 2025-11-25 | 坐席工作台 SSE 实时推送功能完成 ⭐ 新增约束18 |
+| v2.3.8 | 2025-11-24 | 新增坐席认证系统和管理员功能文档 ⭐ 新增约束17 |
 | v2.3.4 | 2025-11-24 | 文档整理：新增文档导航和 GitHub 提交规范 |
 | v2.3.3 | 2025-11-24 | 文档整理：移动过程文档和归档旧版本 |
 | v2.4.0 | 2025-11-23 | 文档重新组织，添加索引导航 |

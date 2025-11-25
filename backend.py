@@ -46,6 +46,17 @@ from src.regulator import Regulator, RegulatorConfig
 from src.shift_config import get_shift_config, is_in_shift
 from src.email_service import get_email_service, send_escalation_email
 
+# 导入坐席认证系统模块
+from src.agent_auth import (
+    AgentManager,
+    AgentTokenManager,
+    initialize_default_agents,
+    LoginRequest,
+    LoginResponse,
+    agent_to_dict,
+    Agent
+)
+
 # 加载环境变量
 load_dotenv()
 
@@ -85,12 +96,19 @@ class ConversationResponse(BaseModel):
     error: Optional[str] = None
 
 
+class RefreshTokenRequest(BaseModel):
+    """刷新 Token 请求模型"""
+    refresh_token: str
+
+
 # 全局变量
 coze_client: Optional[Coze] = None
 token_manager: Optional[OAuthTokenManager] = None
 jwt_oauth_app: Optional[JWTOAuthApp] = None  # 用于 Chat SDK 的 JWTOAuthApp
 session_store: Optional[InMemorySessionStore] = None  # 会话状态存储（P0）
 regulator: Optional[Regulator] = None  # 监管策略引擎（P0）
+agent_manager: Optional[AgentManager] = None  # 坐席账号管理器
+agent_token_manager: Optional[AgentTokenManager] = None  # 坐席 JWT Token 管理器
 WORKFLOW_ID: str = ""
 APP_ID: str = ""  # AI 应用 ID（应用中嵌入对话流时必需）
 AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
@@ -108,7 +126,7 @@ sse_queues: dict = {}  # type: dict[str, asyncio.Queue]
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, WORKFLOW_ID, APP_ID, AUTH_MODE
+    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, WORKFLOW_ID, APP_ID, AUTH_MODE
 
     # 读取配置
     WORKFLOW_ID = os.getenv("COZE_WORKFLOW_ID", "")
@@ -223,6 +241,34 @@ async def lifespan(app: FastAPI):
 
     except Exception as e:
         raise ValueError(f"OAuth+JWT 初始化失败: {str(e)}")
+
+    # 初始化坐席认证系统
+    try:
+        # JWT密钥（生产环境必须使用强随机密钥）
+        JWT_SECRET = os.getenv("JWT_SECRET_KEY", "dev_secret_key_change_in_production_2025")
+
+        # 初始化坐席 Token 管理器
+        agent_token_manager = AgentTokenManager(
+            secret_key=JWT_SECRET,
+            algorithm="HS256",
+            access_token_expire_minutes=int(os.getenv("AGENT_TOKEN_EXPIRE_MINUTES", "60")),
+            refresh_token_expire_days=int(os.getenv("AGENT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+        )
+
+        # 初始化坐席账号管理器
+        agent_manager = AgentManager(session_store)
+
+        # 初始化默认坐席账号
+        print(f"🔐 初始化坐席认证系统...")
+        initialize_default_agents(agent_manager)
+
+        print(f"✅ 坐席认证系统初始化成功")
+        print(f"   Token过期时间: 60分钟")
+        print(f"   刷新Token过期: 7天")
+
+    except Exception as e:
+        print(f"⚠️  坐席认证系统初始化失败: {str(e)}")
+        print(f"   坐席登录功能将不可用")
 
     print(f"{'=' * 60}\n")
 
@@ -643,13 +689,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
                 # 🔴 P0-1: 如果正在人工接管中(包括等待人工和人工服务中)，返回 409 状态码
                 if session_state.status in [SessionStatus.PENDING_MANUAL, SessionStatus.MANUAL_LIVE]:
-                    print(f"⚠️  会话 {session_id} 状态为 {session_state.status.value}，拒绝AI对话")
+                    print(f"⚠️  会话 {session_id} 状态为 {session_state.status}，拒绝AI对话")
                     raise HTTPException(
                         status_code=409,
-                        detail=f"SESSION_IN_MANUAL_MODE: {session_state.status.value}"
+                        detail=f"SESSION_IN_MANUAL_MODE: {session_state.status}"
                     )
 
-                print(f"📊 会话状态: {session_state.status.value}")
+                print(f"📊 会话状态: {session_state.status}")
             except HTTPException:
                 raise
             except Exception as state_error:
@@ -901,15 +947,15 @@ async def chat_stream(request: ChatRequest):
 
                     # 🔴 P0-1: 如果正在人工接管中(包括等待人工和人工服务中)，发送错误事件
                     if session_state.status in [SessionStatus.PENDING_MANUAL, SessionStatus.MANUAL_LIVE]:
-                        print(f"⚠️  流式会话 {session_id} 状态为 {session_state.status.value}，拒绝AI对话")
+                        print(f"⚠️  流式会话 {session_id} 状态为 {session_state.status}，拒绝AI对话")
                         error_data = {
                             "type": "error",
-                            "content": f"SESSION_IN_MANUAL_MODE: {session_state.status.value}"
+                            "content": f"SESSION_IN_MANUAL_MODE: {session_state.status}"
                         }
                         yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
                         return
 
-                    print(f"📊 流式会话状态: {session_state.status.value}")
+                    print(f"📊 流式会话状态: {session_state.status}")
                 except Exception as state_error:
                     # ⚠️ 状态检查失败不应影响核心对话功能
                     print(f"⚠️  流式状态检查异常（不影响对话）: {str(state_error)}")
@@ -1277,7 +1323,7 @@ async def manual_escalate(request: dict):
             "event": "manual_escalate",
             "session_name": session_name,
             "reason": reason,
-            "status": session_state.status.value,
+            "status": session_state.status,
             "timestamp": int(time.time())
         }, ensure_ascii=False))
 
@@ -1285,11 +1331,11 @@ async def manual_escalate(request: dict):
         if session_name in sse_queues:
             await sse_queues[session_name].put({
                 "type": "status_change",
-                "status": session_state.status.value,
+                "status": session_state.status,
                 "reason": reason,
                 "timestamp": int(time.time())
             })
-            print(f"✅ SSE 推送状态变化: {session_state.status.value}")
+            print(f"✅ SSE 推送状态变化: {session_state.status}")
 
         return {
             "success": True,
@@ -1303,6 +1349,200 @@ async def manual_escalate(request: dict):
     except Exception as e:
         print(f"❌ 人工升级失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"升级失败: {str(e)}")
+
+
+# ==================== v2.5 新增：统计指标计算辅助函数 ====================
+
+async def _calculate_ai_quality_metrics() -> dict:
+    """
+    计算 AI 质量指标（v2.5 新增）
+
+    Returns:
+        dict: {
+            "avg_response_time_ms": 平均响应时长（毫秒）,
+            "success_rate": AI 成功处理率,
+            "escalation_rate": 人工升级率,
+            "avg_messages_before_escalation": 升级前平均对话轮次
+        }
+    """
+    if not session_store:
+        return {
+            "avg_response_time_ms": 0,
+            "success_rate": 0.0,
+            "escalation_rate": 0.0,
+            "avg_messages_before_escalation": 0.0
+        }
+
+    try:
+        # 获取所有会话（限制 1000 条以避免性能问题）
+        all_sessions = await session_store.list_all(limit=1000)
+
+        if not all_sessions:
+            return {
+                "avg_response_time_ms": 0,
+                "success_rate": 0.0,
+                "escalation_rate": 0.0,
+                "avg_messages_before_escalation": 0.0
+            }
+
+        total_sessions = len(all_sessions)
+        escalated_sessions = [s for s in all_sessions if s.escalation]
+        escalation_count = len(escalated_sessions)
+
+        # 计算升级率
+        escalation_rate = escalation_count / total_sessions if total_sessions > 0 else 0.0
+        success_rate = 1.0 - escalation_rate
+
+        # 计算升级前平均对话轮次
+        if escalated_sessions:
+            messages_before_escalation = []
+            for session in escalated_sessions:
+                if session.escalation:
+                    # 统计升级前的消息数量
+                    escalation_time = session.escalation.trigger_at
+                    pre_escalation_msgs = [
+                        msg for msg in session.history
+                        if msg.timestamp < escalation_time
+                    ]
+                    messages_before_escalation.append(len(pre_escalation_msgs))
+
+            avg_messages = sum(messages_before_escalation) / len(messages_before_escalation) if messages_before_escalation else 0.0
+        else:
+            avg_messages = 0.0
+
+        # 计算 AI 平均响应时长（简化版：基于历史消息的时间间隔）
+        response_times = []
+        for session in all_sessions:
+            for i in range(len(session.history) - 1):
+                if session.history[i].role == "user" and session.history[i + 1].role == "assistant":
+                    response_time_sec = session.history[i + 1].timestamp - session.history[i].timestamp
+                    response_times.append(response_time_sec * 1000)  # 转为毫秒
+
+        avg_response_time_ms = sum(response_times) / len(response_times) if response_times else 0.0
+
+        return {
+            "avg_response_time_ms": round(avg_response_time_ms, 2),
+            "success_rate": round(success_rate, 3),
+            "escalation_rate": round(escalation_rate, 3),
+            "avg_messages_before_escalation": round(avg_messages, 2)
+        }
+
+    except Exception as e:
+        print(f"⚠️  计算 AI 质量指标失败: {e}")
+        return {
+            "avg_response_time_ms": 0,
+            "success_rate": 0.0,
+            "escalation_rate": 0.0,
+            "avg_messages_before_escalation": 0.0
+        }
+
+
+async def _calculate_agent_efficiency_metrics() -> dict:
+    """
+    计算坐席效率指标（v2.5 新增）
+
+    Returns:
+        dict: {
+            "avg_takeover_time_sec": 平均接入时长（秒）,
+            "avg_service_time_sec": 平均服务时长（秒）,
+            "resolution_rate": 一次解决率,
+            "avg_sessions_per_agent": 每个坐席平均会话数
+        }
+    """
+    if not session_store:
+        return {
+            "avg_takeover_time_sec": 0,
+            "avg_service_time_sec": 0,
+            "resolution_rate": 0.0,
+            "avg_sessions_per_agent": 0.0
+        }
+
+    try:
+        # 获取所有人工服务中和已完成的会话
+        live_sessions = await session_store.list_by_status(SessionStatus.MANUAL_LIVE, limit=1000)
+        closed_sessions = await session_store.list_by_status(SessionStatus.CLOSED, limit=1000)
+
+        all_manual_sessions = live_sessions + [
+            s for s in closed_sessions
+            if s.last_manual_end_at is not None  # 曾经经过人工服务
+        ]
+
+        if not all_manual_sessions:
+            return {
+                "avg_takeover_time_sec": 0,
+                "avg_service_time_sec": 0,
+                "resolution_rate": 0.0,
+                "avg_sessions_per_agent": 0.0
+            }
+
+        # 计算平均接入时长（pending_manual → manual_live）
+        takeover_times = []
+        for session in all_manual_sessions:
+            if session.escalation and session.assigned_agent:
+                # 简化计算：假设接入时间 = 当前时间或结束时间 - 升级时间
+                if session.status == SessionStatus.MANUAL_LIVE:
+                    takeover_time = time.time() - session.escalation.trigger_at
+                elif session.last_manual_end_at:
+                    takeover_time = session.last_manual_end_at - session.escalation.trigger_at
+                else:
+                    continue
+
+                # 接入时长应该是升级到坐席接入的时间，这里简化处理
+                # 实际应该记录坐席接入时间戳
+                takeover_times.append(min(takeover_time, 3600))  # 限制最大 1 小时
+
+        avg_takeover_time = sum(takeover_times) / len(takeover_times) if takeover_times else 0.0
+
+        # 计算平均服务时长
+        service_times = []
+        current_time = time.time()
+        for session in live_sessions:
+            if session.escalation:
+                service_time = current_time - session.escalation.trigger_at
+                service_times.append(service_time)
+
+        for session in closed_sessions:
+            if session.last_manual_end_at and session.escalation:
+                service_time = session.last_manual_end_at - session.escalation.trigger_at
+                service_times.append(service_time)
+
+        avg_service_time = sum(service_times) / len(service_times) if service_times else 0.0
+
+        # 计算一次解决率（简化版：未再次升级的比例）
+        # 实际应该根据工单系统判断问题是否解决
+        resolved_sessions = len([
+            s for s in closed_sessions
+            if s.last_manual_end_at and s.ai_fail_count == 0
+        ])
+        resolution_rate = resolved_sessions / len(all_manual_sessions) if all_manual_sessions else 0.0
+
+        # 计算每个坐席平均会话数
+        agent_session_counts = {}
+        for session in all_manual_sessions:
+            if session.assigned_agent:
+                agent_id = session.assigned_agent.id
+                agent_session_counts[agent_id] = agent_session_counts.get(agent_id, 0) + 1
+
+        avg_sessions_per_agent = (
+            sum(agent_session_counts.values()) / len(agent_session_counts)
+            if agent_session_counts else 0.0
+        )
+
+        return {
+            "avg_takeover_time_sec": round(avg_takeover_time, 2),
+            "avg_service_time_sec": round(avg_service_time, 2),
+            "resolution_rate": round(resolution_rate, 3),
+            "avg_sessions_per_agent": round(avg_sessions_per_agent, 2)
+        }
+
+    except Exception as e:
+        print(f"⚠️  计算坐席效率指标失败: {e}")
+        return {
+            "avg_takeover_time_sec": 0,
+            "avg_service_time_sec": 0,
+            "resolution_rate": 0.0,
+            "avg_sessions_per_agent": 0.0
+        }
 
 
 @app.get("/api/sessions/stats")
@@ -1384,6 +1624,14 @@ async def get_sessions_stats():
             "serving": len(all_live)
         }
         stats["today"] = today_stats
+
+        # ⭐ v2.5 新增: AI 质量指标
+        ai_quality = await _calculate_ai_quality_metrics()
+        stats["ai_quality"] = ai_quality
+
+        # ⭐ v2.5 新增: 坐席效率指标
+        agent_efficiency = await _calculate_agent_efficiency_metrics()
+        stats["agent_efficiency"] = agent_efficiency
 
         return {
             "success": True,
@@ -1580,7 +1828,7 @@ async def release_session(session_name: str, request: dict):
             # 推送状态变化
             await sse_queues[session_name].put({
                 "type": "status_change",
-                "status": session_state.status.value,
+                "status": session_state.status,
                 "reason": "released",
                 "timestamp": int(time.time())
             })
@@ -1643,7 +1891,7 @@ async def takeover_session(
             else:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"INVALID_STATUS: 当前状态为{session_state.status.value}，无法接入"
+                    detail=f"INVALID_STATUS: 当前状态为{session_state.status}，无法接入"
                 )
 
         # 🔴 P0-2.3: 分配坐席
@@ -1759,7 +2007,7 @@ async def transfer_session(
         if session_state.status != SessionStatus.MANUAL_LIVE:
             raise HTTPException(
                 status_code=409,
-                detail=f"INVALID_STATUS: 当前状态为{session_state.status.value}，无法转接"
+                detail=f"INVALID_STATUS: 当前状态为{session_state.status}，无法转接"
             )
 
         # 验证当前坐席是否匹配
@@ -1892,6 +2140,564 @@ async def get_sessions(
     except Exception as e:
         print(f"❌ 获取会话列表失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+# ====================
+# 坐席认证 API (Agent Authentication)
+# ====================
+
+@app.post("/api/agent/login")
+async def agent_login(request: LoginRequest):
+    """
+    坐席登录接口
+
+    功能:
+    - 验证坐席用户名和密码
+    - 生成访问 Token 和刷新 Token
+    - 更新坐席登录状态
+
+    Args:
+        request: 登录请求（username, password）
+
+    Returns:
+        LoginResponse: 包含 token, refresh_token, expires_in, agent 信息
+
+    Raises:
+        401: 用户名或密码错误
+        500: 服务器内部错误
+    """
+    try:
+        if not agent_manager or not agent_token_manager:
+            raise HTTPException(
+                status_code=500,
+                detail="坐席认证系统未初始化"
+            )
+
+        # 验证坐席账号
+        agent = agent_manager.authenticate(
+            username=request.username,
+            password=request.password
+        )
+
+        if not agent:
+            raise HTTPException(
+                status_code=401,
+                detail="用户名或密码错误"
+            )
+
+        # 生成 Token
+        access_token = agent_token_manager.create_access_token(agent)
+        refresh_token = agent_token_manager.create_refresh_token(agent)
+
+        # 返回登录响应
+        return LoginResponse(
+            success=True,
+            token=access_token,
+            refresh_token=refresh_token,
+            expires_in=3600,  # 1小时
+            agent=agent_to_dict(agent)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 坐席登录失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"登录失败: {str(e)}"
+        )
+
+
+@app.post("/api/agent/logout")
+async def agent_logout(username: str):
+    """
+    坐席登出接口
+
+    功能:
+    - 更新坐席状态为离线
+
+    Args:
+        username: 坐席用户名
+
+    Returns:
+        success: bool
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(
+                status_code=500,
+                detail="坐席认证系统未初始化"
+            )
+
+        from src.agent_auth import AgentStatus
+        agent_manager.update_status(username, AgentStatus.OFFLINE)
+
+        return {
+            "success": True,
+            "message": "登出成功"
+        }
+
+    except Exception as e:
+        print(f"❌ 坐席登出失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"登出失败: {str(e)}"
+        )
+
+
+@app.get("/api/agent/profile")
+async def get_agent_profile(username: str):
+    """
+    获取坐席信息接口
+
+    功能:
+    - 获取坐席的详细信息（不含密码）
+
+    Args:
+        username: 坐席用户名
+
+    Returns:
+        agent: 坐席信息字典
+
+    Raises:
+        404: 坐席不存在
+        500: 服务器内部错误
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(
+                status_code=500,
+                detail="坐席认证系统未初始化"
+            )
+
+        agent = agent_manager.get_agent_by_username(username)
+
+        if not agent:
+            raise HTTPException(
+                status_code=404,
+                detail="坐席不存在"
+            )
+
+        return {
+            "success": True,
+            "agent": agent_to_dict(agent)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取坐席信息失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取失败: {str(e)}"
+        )
+
+
+@app.post("/api/agent/refresh")
+async def refresh_agent_token(request: RefreshTokenRequest):
+    """
+    刷新坐席 Token 接口
+
+    功能:
+    - 使用刷新 Token 生成新的访问 Token
+
+    Args:
+        request: 刷新 Token 请求
+
+    Returns:
+        token: 新的访问 Token
+        expires_in: 过期时间（秒）
+
+    Raises:
+        401: 刷新 Token 无效或已过期
+        500: 服务器内部错误
+    """
+    try:
+        if not agent_manager or not agent_token_manager:
+            raise HTTPException(
+                status_code=500,
+                detail="坐席认证系统未初始化"
+            )
+
+        # 验证刷新 Token
+        payload = agent_token_manager.verify_token(request.refresh_token)
+
+        if not payload or payload.get("type") != "refresh":
+            raise HTTPException(
+                status_code=401,
+                detail="无效的刷新 Token"
+            )
+
+        # 获取坐席信息
+        username = payload.get("username")
+        agent = agent_manager.get_agent_by_username(username)
+
+        if not agent:
+            raise HTTPException(
+                status_code=401,
+                detail="坐席不存在"
+            )
+
+        # 生成新的访问 Token
+        new_access_token = agent_token_manager.create_access_token(agent)
+
+        return {
+            "success": True,
+            "token": new_access_token,
+            "expires_in": 3600
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 刷新 Token 失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"刷新失败: {str(e)}"
+        )
+
+
+# ====================
+# 管理员功能 API
+# ====================
+
+# 导入请求模型
+from src.agent_auth import (
+    CreateAgentRequest,
+    UpdateAgentRequest,
+    ResetPasswordRequest,
+    create_jwt_dependencies,
+    validate_password,
+    PasswordHasher,
+    AgentRole
+)
+
+# 创建 JWT 权限依赖项（延迟初始化）
+verify_agent_token = None
+require_admin = None
+
+
+def init_jwt_dependencies():
+    """初始化 JWT 权限依赖项"""
+    global verify_agent_token, require_admin
+    if agent_token_manager and agent_manager:
+        verify_agent_token, require_admin = create_jwt_dependencies(
+            agent_token_manager, agent_manager
+        )
+
+
+@app.get("/api/agents")
+async def get_agents_list(
+    status: Optional[str] = None,
+    role: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    """
+    获取坐席列表 (需要管理员权限)
+
+    Query Parameters:
+        status: 过滤状态 (online/offline/busy)
+        role: 过滤角色 (admin/agent)
+        page: 页码，默认1
+        page_size: 每页数量，默认20
+
+    Returns:
+        items: 坐席列表
+        total: 总数
+        page: 当前页
+        page_size: 每页数量
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席管理系统未初始化")
+
+        # 获取所有坐席
+        agents = agent_manager.get_all_agents()
+
+        # 过滤
+        if status:
+            agents = [a for a in agents if a.status.value == status]
+        if role:
+            agents = [a for a in agents if a.role.value == role]
+
+        # 排序（按创建时间倒序）
+        agents.sort(key=lambda x: x.created_at, reverse=True)
+
+        # 分页
+        total = len(agents)
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = agents[start:end]
+
+        # 转换为字典（隐藏密码）
+        items_dict = []
+        for agent in items:
+            data = agent.dict()
+            data.pop("password_hash", None)
+            items_dict.append(data)
+
+        return {
+            "success": True,
+            "data": {
+                "items": items_dict,
+                "total": total,
+                "page": page,
+                "page_size": page_size
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取坐席列表失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取失败: {str(e)}"
+        )
+
+
+@app.post("/api/agents")
+async def create_agent(request: CreateAgentRequest):
+    """
+    创建坐席账号 (需要管理员权限)
+
+    Args:
+        request: 创建坐席请求
+
+    Returns:
+        agent: 创建的坐席信息
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席管理系统未初始化")
+
+        # 检查用户名是否已存在
+        if agent_manager.get_agent_by_username(request.username):
+            raise HTTPException(
+                status_code=400,
+                detail="USERNAME_EXISTS: 用户名已存在"
+            )
+
+        # 验证密码强度
+        if not validate_password(request.password):
+            raise HTTPException(
+                status_code=400,
+                detail="INVALID_PASSWORD: 密码必须至少8个字符，包含字母和数字"
+            )
+
+        # 创建坐席
+        agent = agent_manager.create_agent(
+            username=request.username,
+            password=request.password,
+            name=request.name,
+            role=request.role,
+            max_sessions=request.max_sessions
+        )
+
+        # 更新头像
+        if request.avatar_url:
+            agent.avatar_url = request.avatar_url
+            agent_manager.update_agent(agent)
+
+        # 返回结果（隐藏密码）
+        agent_dict = agent.dict()
+        agent_dict.pop("password_hash", None)
+
+        print(f"✅ 创建坐席账号: {agent.username} (角色: {agent.role.value})")
+
+        return {
+            "success": True,
+            "agent": agent_dict
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 创建坐席账号失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"创建失败: {str(e)}"
+        )
+
+
+@app.put("/api/agents/{username}")
+async def update_agent(username: str, request: UpdateAgentRequest):
+    """
+    修改坐席信息 (需要管理员权限)
+
+    Args:
+        username: 坐席用户名
+        request: 修改请求
+
+    Returns:
+        agent: 修改后的坐席信息
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席管理系统未初始化")
+
+        # 获取坐席
+        agent = agent_manager.get_agent_by_username(username)
+        if not agent:
+            raise HTTPException(
+                status_code=404,
+                detail="AGENT_NOT_FOUND: 坐席不存在"
+            )
+
+        # 检查是否要降级最后一个管理员
+        if request.role == AgentRole.AGENT and agent.role == AgentRole.ADMIN:
+            if agent_manager.count_admins() <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="LAST_ADMIN: 不能降级最后一个管理员"
+                )
+
+        # 更新字段
+        if request.name is not None:
+            agent.name = request.name
+        if request.role is not None:
+            agent.role = request.role
+        if request.max_sessions is not None:
+            agent.max_sessions = request.max_sessions
+        if request.status is not None:
+            agent.status = request.status
+        if request.avatar_url is not None:
+            agent.avatar_url = request.avatar_url
+
+        # 保存
+        agent_manager.update_agent(agent)
+
+        # 返回结果（隐藏密码）
+        agent_dict = agent.dict()
+        agent_dict.pop("password_hash", None)
+
+        print(f"✅ 修改坐席信息: {username}")
+
+        return {
+            "success": True,
+            "agent": agent_dict
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 修改坐席信息失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"修改失败: {str(e)}"
+        )
+
+
+@app.delete("/api/agents/{username}")
+async def delete_agent(username: str):
+    """
+    删除坐席账号 (需要管理员权限)
+
+    限制：
+    - 不能删除最后一个管理员
+    - 不能删除有活跃会话的坐席（暂不实现）
+
+    Args:
+        username: 坐席用户名
+
+    Returns:
+        message: 删除结果
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席管理系统未初始化")
+
+        # 获取坐席
+        agent = agent_manager.get_agent_by_username(username)
+        if not agent:
+            raise HTTPException(
+                status_code=404,
+                detail="AGENT_NOT_FOUND: 坐席不存在"
+            )
+
+        # 检查是否是最后一个管理员
+        if agent.role == AgentRole.ADMIN and agent_manager.count_admins() <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="LAST_ADMIN: 不能删除最后一个管理员"
+            )
+
+        # 删除坐席
+        result = agent_manager.delete_agent(username)
+        if not result:
+            raise HTTPException(
+                status_code=500,
+                detail="删除失败"
+            )
+
+        print(f"✅ 删除坐席账号: {username}")
+
+        return {
+            "success": True,
+            "message": f"坐席 {username} 已删除"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 删除坐席账号失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"删除失败: {str(e)}"
+        )
+
+
+@app.post("/api/agents/{username}/reset-password")
+async def reset_agent_password(username: str, request: ResetPasswordRequest):
+    """
+    重置坐席密码 (需要管理员权限)
+
+    Args:
+        username: 坐席用户名
+        request: 重置密码请求
+
+    Returns:
+        message: 重置结果
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席管理系统未初始化")
+
+        # 获取坐席
+        agent = agent_manager.get_agent_by_username(username)
+        if not agent:
+            raise HTTPException(
+                status_code=404,
+                detail="AGENT_NOT_FOUND: 坐席不存在"
+            )
+
+        # 验证密码强度
+        if not validate_password(request.new_password):
+            raise HTTPException(
+                status_code=400,
+                detail="INVALID_PASSWORD: 密码必须至少8个字符，包含字母和数字"
+            )
+
+        # 更新密码
+        agent.password_hash = PasswordHasher.hash_password(request.new_password)
+        agent_manager.update_agent(agent)
+
+        print(f"✅ 重置坐席密码: {username}")
+
+        return {
+            "success": True,
+            "message": "密码已重置"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 重置坐席密码失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"重置失败: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

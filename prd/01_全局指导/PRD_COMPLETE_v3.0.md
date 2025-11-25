@@ -2,17 +2,43 @@
 
 ## 📋 文档信息
 
-- **文档版本**: v3.0
-- **更新时间**: 2025-11-21
-- **文档状态**: 补充完善版（基于实际项目进度）
-- **变更原因**: 基于项目实际实现情况，补充缺失的前端UI、坐席工作台、状态机完善等内容
+- **文档版本**: v3.1
+- **更新时间**: 2025-11-25
+- **文档状态**: 整合 Fiido E-bike 业务需求
+- **变更原因**: 基于 codex.md 业务需求，整合用户画像扩展、统计功能增强、合规性要求
 - **目标**: 实现完整的、可用的、企业可落地的人工接管闭环功能
+
+---
+
+## 🏢 项目业务背景
+
+### Fiido E-bike 跨境独立站客服系统
+
+**业务场景**：
+- **独立站平台**: 基于 Shopify 搭建的欧洲独立站 (www.fiido.com)
+- **产品线**: 10+ 款 E-bike 车型（C11/C11 Pro/C21、T1 Pro/T2、Titan、Air、Nomads 等）
+- **目标市场**: 欧洲市场（EU/UK），覆盖多国家、多语言、多币种
+- **业务复杂度**:
+  - 售前：配置咨询、价格对比、合法性说明（CE 认证）
+  - 订单履约：Shopify 订单同步、物流通关、VAT/关税处理
+  - 售后服务：电池维保、固件升级、退款换货、RMA 流程
+
+**AI 客服覆盖率**: 70%+ 常规咨询由 AI 处理，剩余 30% 需要人工坐席实时接管处理：
+- 高价值订单咨询（>€2000）
+- 欧洲本地法规问题（GDPR、EU Battery Regulation）
+- 技术故障诊断（电池、电机、固件）
+- 跨境物流异常处理
 
 ---
 
 ## 🎯 核心目标
 
 **最终目标**：实现AI客服的人工接管完整闭环，当后端按照一定逻辑判断触发人工，并转接到人工时，人工可以实时在线回复，形成企业可落地的完整功能。
+
+**业务目标**（基于 Fiido 场景）：
+1. 聚合客户画像、订单、物流、支付和设备诊断数据，支持欧洲多语言、多币种、多站点的用户背景洞察
+2. 结合 AI 监控规则、手动分配与队列管理，支持对会话状态的实时接管
+3. 通过运营分析与数据统计，持续优化 AI 答复质量、坐席效率、发货/售后 SLA，确保企业级交付与法规合规
 
 ---
 
@@ -540,7 +566,16 @@ Response 200:
       {
         "session_name": "session_123",
         "status": "pending_manual",
-        "user_profile": { "nickname": "访客A", "vip": true },
+        "user_profile": {
+          "nickname": "访客A",
+          "vip": true,
+          "gdpr_consent": true,
+          "marketing_subscribed": false,
+          "country": "DE",
+          "city": "Berlin",
+          "language": "de",
+          "currency": "EUR"
+        },
         "last_message_preview": { "role": "user", "content": "我要人工", "timestamp": 1763605000 },
         "escalation": { "reason": "keyword", "trigger_at": 1763605000, "waiting_seconds": 120 },
         "assigned_agent": null,
@@ -586,7 +621,7 @@ Response 409:
 }
 ```
 
-#### 3. 会话统计接口
+#### 3. 会话统计接口（增强版）
 
 ```http
 GET /api/sessions/stats
@@ -603,10 +638,39 @@ Response 200:
       "closed": 5
     },
     "active_agents": 2,
-    "avg_waiting_time": 120  // 秒
+    "avg_waiting_time": 120,  // 秒
+
+    // ⭐ 新增：AI 质量指标
+    "ai_quality": {
+      "avg_response_time_ms": 850,
+      "success_rate": 0.85,
+      "escalation_rate": 0.15,
+      "avg_messages_before_escalation": 3.5
+    },
+
+    // ⭐ 新增：坐席效率指标
+    "agent_efficiency": {
+      "avg_takeover_time_sec": 120,
+      "avg_service_time_sec": 300,
+      "resolution_rate": 0.92,
+      "avg_sessions_per_agent": 6.5
+    }
   }
 }
 ```
+
+**说明**：
+- `ai_quality`: AI 表现质量指标
+  - `avg_response_time_ms`: AI 平均响应时长（毫秒）
+  - `success_rate`: AI 成功处理率（未触发人工升级）
+  - `escalation_rate`: 人工升级率
+  - `avg_messages_before_escalation`: 升级前平均对话轮次
+
+- `agent_efficiency`: 坐席效率指标
+  - `avg_takeover_time_sec`: 平均接入时长（从 pending 到 live）
+  - `avg_service_time_sec`: 平均服务时长（live 状态持续时间）
+  - `resolution_rate`: 一次解决率（未转接/未再次升级）
+  - `avg_sessions_per_agent`: 每个坐席平均会话数
 
 ---
 
@@ -799,6 +863,118 @@ test('完整人工接管流程', async ({ page }) => {
 
 ---
 
+## 🔐 坐席认证系统 ⭐ 新增 (v2.3.7+)
+
+### 功能概述
+
+坐席认证系统为坐席工作台提供完整的身份认证能力：
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 坐席登录/登出 | ✅ 已完成 | JWT Token 认证 |
+| 密码加密存储 | ✅ 已完成 | bcrypt 加密 |
+| Token 刷新机制 | ✅ 已完成 | 1小时有效期，7天刷新 |
+| 默认账号初始化 | ✅ 已完成 | 3个默认账号 |
+| JWT 权限中间件 | 🔜 计划中 | 保护工作台 API |
+| 坐席账号管理 | 🔜 计划中 | CRUD 操作 |
+| 角色权限控制 | 🔜 计划中 | admin/agent |
+
+### 相关文档
+
+- `prd/02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md` - 约束17（坐席认证安全性）
+- `prd/03_技术方案/api_contract.md` - 坐席认证 API 接口
+- `prd/04_任务拆解/admin_management_tasks.md` - 管理员功能任务拆解
+- `docs/坐席认证系统实施报告.md` - 实施报告
+- `docs/坐席认证系统答疑文档.md` - 答疑文档
+- `docs/坐席认证系统手动测试指南.md` - 测试指南
+
+---
+
+## 🌍 合规性与安全性要求 ⭐ 新增 (v3.1)
+
+### 数据隐私与合规
+
+基于 Fiido E-bike 欧洲市场业务，系统需满足以下合规要求：
+
+#### 1. GDPR（通用数据保护条例）
+
+**用户画像合规字段**：
+- `gdpr_consent`: 用户是否同意数据收集与处理
+- `marketing_subscribed`: 是否同意营销通讯（可随时撤销）
+
+**数据处理原则**：
+- ✅ 透明性：用户可查看已收集的数据
+- ✅ 最小化：仅收集必要的业务数据
+- ✅ 存储限制：会话数据保留期限（建议 90 天）
+- ✅ 数据导出：用户可请求导出个人数据
+- ✅ 删除权：用户可请求删除个人数据（"被遗忘权"）
+
+**敏感数据加密**：
+- 用户邮箱、电话：加密存储
+- 支付信息：不存储完整卡号，仅存储 Shopify 订单引用
+- 地址信息：加密存储
+
+#### 2. EU Battery Regulation（欧盟电池法规）
+
+**适用产品**: 所有电池驱动的 E-bike 产品
+
+**合规要求**：
+- 电池标签：必须包含容量、制造商、回收标识
+- 环保信息：电池回收说明
+- 安全警告：运输限制（航空运输限制）
+
+**AI 客服支持**：
+- 知识库包含电池法规 FAQ
+- 坐席工作台显示车型对应的电池型号和回收说明
+
+#### 3. CE 认证（欧洲合格认证）
+
+**产品认证**：
+- 所有 E-bike 车型必须持有 CE 认证
+- 坐席可快速查询车型的 CE 认证号
+
+**AI 对话支持**：
+- 自动识别"合法性"相关问题
+- 返回对应车型的 CE 认证信息
+
+### 安全性要求
+
+#### 1. 数据传输安全
+
+- ✅ **全链路 TLS**：生产环境强制 HTTPS
+- ✅ **API 鉴权**：JWT Token 认证
+- ✅ **CORS 配置**：白名单限制跨域请求
+
+#### 2. 数据存储安全
+
+- ✅ **密码加密**：bcrypt 加密存储（坐席账号）
+- ✅ **敏感字段加密**：用户邮箱、电话、地址
+- ✅ **日志脱敏**：不记录密码、Token、支付信息
+
+#### 3. 访问控制
+
+- ✅ **角色权限**：坐席、组长、管理员分级权限
+- ✅ **会话隔离**：坐席只能访问分配给自己的会话
+- ✅ **审计日志**：记录所有坐席操作（接入、释放、转接）
+
+### 合规性文档
+
+详细的合规性实施指南见：`docs/合规性说明.md`（待创建）
+
+---
+
+## 📚 相关文档
+
+1. **PRD文档**
+- `prd/02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md` - 约束17（坐席认证安全性）
+- `prd/03_技术方案/api_contract.md` - 坐席认证 API 接口
+- `prd/04_任务拆解/admin_management_tasks.md` - 管理员功能任务拆解
+- `docs/坐席认证系统实施报告.md` - 实施报告
+- `docs/坐席认证系统答疑文档.md` - 答疑文档
+- `docs/坐席认证系统手动测试指南.md` - 测试指南
+
+---
+
 ## 📚 相关文档
 
 1. **PRD文档**
@@ -809,6 +985,7 @@ test('完整人工接管流程', async ({ page }) => {
    - `prd/backend_tasks.md` - 后端任务
    - `prd/frontend_client_tasks.md` - 前端用户端任务
    - `prd/agent_workbench_tasks.md` - 坐席工作台任务
+   - `prd/04_任务拆解/admin_management_tasks.md` - 管理员功能任务 ⭐ 新增
 
 3. **技术文档**
    - `prd/TECHNICAL_CONSTRAINTS.md` - 技术约束
@@ -817,6 +994,7 @@ test('完整人工接管流程', async ({ page }) => {
 
 4. **实现文档**
    - `docs/P0-完成总结.md` - P0完成总结
+   - `docs/坐席认证系统实施报告.md` - 坐席认证实施报告 ⭐ 新增
    - `README.md` - 项目说明
 
 ---

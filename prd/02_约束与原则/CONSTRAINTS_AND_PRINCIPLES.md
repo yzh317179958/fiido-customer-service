@@ -1706,6 +1706,482 @@ du -sh /var/log/app.log
 
 **文档维护者**: Claude Code
 **最后更新**: 2025-11-24
-**文档版本**: v1.6 ⭐ 新增生产环境安全性与稳定性约束 (约束16)
+**文档版本**: v1.7 ⭐ 新增坐席认证系统约束 (约束17)
 **审核状态**: ✅ 已完成
 **验证状态**: ✅ 生产可用 (12/12 测试通过)
+
+---
+
+## 约束17: 坐席认证系统安全性约束 ⭐ 新增 (2025-11-24)
+
+### 17.1 核心原则
+
+坐席认证系统是独立于 Coze API 的本地认证模块，用于保护坐席工作台 API。
+
+**设计原则**:
+- ✅ 独立运行：不依赖 Coze API，使用本地 JWT
+- ✅ 安全优先：bcrypt 密码加密 + JWT Token
+- ✅ 零影响：不修改任何核心 AI 对话接口
+- ✅ 可扩展：支持角色权限控制
+
+### 17.2 密码安全约束
+
+```python
+# ✅ 正确 - 使用 bcrypt 加密
+from bcrypt import hashpw, gensalt, checkpw
+
+def hash_password(password: str) -> str:
+    salt = gensalt()  # 自动加盐
+    return hashpw(password.encode(), salt).decode()
+
+def verify_password(password: str, hash: str) -> bool:
+    return checkpw(password.encode(), hash.encode())
+
+# ❌ 错误 - 明文存储或弱加密
+password_hash = md5(password)  # MD5 不安全
+password_hash = password       # 明文存储
+```
+
+**强制要求**:
+- [ ] 密码必须使用 bcrypt 加密（自动加盐）
+- [ ] 密码哈希永不返回给前端
+- [ ] 生产环境必须修改默认密码
+- [ ] 传输必须使用 HTTPS（生产环境）
+
+### 17.3 JWT Token 约束
+
+```python
+# ✅ 正确 - JWT 配置
+class AgentTokenManager:
+    def __init__(
+        self,
+        secret_key: str,           # 必须从环境变量读取
+        algorithm: str = "HS256",  # 使用 HS256 算法
+        access_token_expire_minutes: int = 60,   # 1小时
+        refresh_token_expire_days: int = 7       # 7天
+    ):
+        pass
+
+# ❌ 错误 - 硬编码密钥
+secret_key = "my_secret_key"  # 硬编码不安全！
+
+# ✅ 正确 - 从环境变量读取
+secret_key = os.getenv("JWT_SECRET_KEY")
+```
+
+**强制要求**:
+- [ ] JWT 密钥必须从环境变量读取
+- [ ] Access Token 有效期不超过 2 小时
+- [ ] Refresh Token 有效期不超过 30 天
+- [ ] 必须验证 Token 签名和过期时间
+- [ ] 刷新 Token 必须标记 type=refresh
+
+### 17.4 API 安全约束
+
+```python
+# ✅ 正确 - 返回时移除密码
+def agent_to_dict(agent: Agent) -> Dict:
+    data = agent.dict()
+    data.pop("password_hash", None)  # 移除密码
+    return data
+
+# ❌ 错误 - 返回完整对象
+return agent.dict()  # 包含 password_hash!
+```
+
+**强制要求**:
+- [ ] 登录失败返回 401，不暴露用户是否存在
+- [ ] 获取信息必须移除 password_hash
+- [ ] 使用 Pydantic 模型验证输入
+- [ ] 所有敏感操作记录审计日志
+
+### 17.5 存储约束
+
+```python
+# ✅ 正确 - Redis 存储坐席账号
+class AgentManager:
+    def __init__(self, redis_store):
+        self.redis = redis_store.redis
+        self.key_prefix = "agent:"
+
+    def create_agent(self, ...):
+        key = f"{self.key_prefix}{username}"
+        self.redis.set(key, agent.json(), ex=86400 * 365)  # 1年过期
+```
+
+**强制要求**:
+- [ ] 坐席数据存储在 Redis（与会话数据分开前缀）
+- [ ] 设置合理的过期时间（建议 1 年）
+- [ ] 用户名作为唯一标识（防止重复）
+- [ ] 支持状态更新（在线/离线/忙碌）
+
+### 17.6 默认账号约束
+
+**默认账号列表**:
+| 用户名 | 角色 | 用途 |
+|-------|------|------|
+| admin | admin | 系统管理 |
+| agent001 | agent | 测试坐席1 |
+| agent002 | agent | 测试坐席2 |
+
+**强制要求**:
+- [ ] ⚠️ 生产环境必须修改默认密码
+- [ ] 启动时检查账号是否存在，避免重复创建
+- [ ] 默认账号仅用于开发测试
+- [ ] 建议生产环境删除或禁用默认账号
+
+### 17.7 生产环境检查清单
+
+每次部署前必须验证:
+
+- [ ] JWT_SECRET_KEY 是否已设置（至少 32 字符强随机密钥）？
+- [ ] 默认密码是否已修改？
+- [ ] HTTPS 是否已启用？
+- [ ] 密码策略是否满足要求（长度、复杂度）？
+- [ ] Token 过期时间是否合理？
+- [ ] 是否有登录失败次数限制？（建议实现）
+- [ ] 是否有审计日志？（建议实现）
+
+### 17.8 API 接口规范
+
+**坐席认证相关接口**:
+
+| 端点 | 方法 | 功能 | 是否需要鉴权 |
+|------|------|------|-------------|
+| `/api/agent/login` | POST | 坐席登录 | 否 |
+| `/api/agent/logout` | POST | 坐席登出 | 否 |
+| `/api/agent/profile` | GET | 获取坐席信息 | 否（后续改为是） |
+| `/api/agent/refresh` | POST | 刷新 Token | 否 |
+
+**请求/响应格式**:
+
+```json
+// POST /api/agent/login
+// Request:
+{
+  "username": "admin",
+  "password": "admin123"
+}
+
+// Response (200):
+{
+  "success": true,
+  "token": "eyJhbGci...",
+  "refresh_token": "eyJhbGci...",
+  "expires_in": 3600,
+  "agent": {
+    "id": "agent_xxx",
+    "username": "admin",
+    "name": "系统管理员",
+    "role": "admin",
+    "status": "online"
+  }
+}
+
+// Response (401):
+{
+  "detail": "用户名或密码错误"
+}
+```
+
+---
+
+**适用场景**:
+- ✅ 坐席登录功能
+- ✅ 坐席工作台 API 保护
+- ✅ 角色权限控制
+- ✅ Token 刷新机制
+
+**违反后果**:
+- 🔴 密码泄露
+- 🔴 未授权访问坐席工作台
+- 🔴 会话劫持
+- 🔴 权限提升攻击
+
+---
+
+## 约束18: 坐席工作台 SSE 实时推送 ⭐ 新增 (v2.3.8+)
+
+**约束编号**: 18
+**约束类型**: 🟡 强烈推荐
+**适用模块**: 前端 - 坐席工作台
+**实施时间**: v2.3.8
+**文档状态**: ✅ 已完成实施
+
+### 18.1 技术选型约束
+
+**强制要求 - 混合策略**:
+```typescript
+// ✅ 正确 - 轻量级轮询(30s) + SSE实时推送
+const startMonitoring = async () => {
+  // 1. 初始加载
+  await sessionStore.fetchSessions()
+  await sessionStore.fetchStats()
+
+  // 2. 轻量级轮询 - 30秒刷新会话列表
+  //   （比5秒轮询节省83%资源）
+  pollTimer.value = window.setInterval(async () => {
+    await sessionStore.fetchSessions()
+    await sessionStore.fetchStats()
+  }, 30000) // 30秒
+
+  // 3. SSE连接 - 监听当前选中的会话
+  if (sessionStore.selectedSession) {
+    monitorCurrentSession() // 建立SSE连接
+  }
+}
+
+// ❌ 错误 - 短轮询浪费资源
+setInterval(refreshData, 5000)  // 5秒轮询
+
+// ❌ 错误 - 纯SSE无法检测新会话
+// 只用SSE不轮询会导致新会话无法及时发现
+```
+
+**原因**:
+1. EventSource 只支持 GET 请求,但 `/api/chat/stream` 是 POST
+2. 不可修改后端核心逻辑(约束1)
+3. 需要检测新会话出现(轮询) + 实时消息推送(SSE)
+
+### 18.2 FetchSSE 实现约束
+
+**强制要求 - 必须使用 Fetch API + ReadableStream**:
+
+```typescript
+// ✅ 正确 - 支持POST的SSE实现
+class FetchSSE {
+  private controller: AbortController | null = null
+  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
+
+  async connect() {
+    this.controller = new AbortController()
+
+    const response = await fetch(this.url, {
+      method: 'POST',  // 支持POST请求
+      headers: { 'Content-Type': 'application/json' },
+      body: this.options.body,
+      signal: this.controller.signal
+    })
+
+    this.reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await this.reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // 解析SSE消息格式: data: {...}\n\n
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = JSON.parse(line.substring(6))
+          this.options.onMessage?.(data)
+        }
+      }
+    }
+  }
+}
+
+// ❌ 错误 - EventSource 不支持POST
+const eventSource = new EventSource('/api/chat/stream')  // 只能GET
+```
+
+### 18.3 自动切换SSE连接约束
+
+**强制要求 - 监听选中会话变化**:
+
+```typescript
+// ✅ 正确 - watch自动切换SSE连接
+watch(
+  () => sessionStore.selectedSession,
+  (newSession, oldSession) => {
+    if (!isMonitoring.value) return
+
+    if (newSession?.session_name !== oldSession?.session_name) {
+      console.log(`🔄 切换监听会话: ${oldSession?.session_name} -> ${newSession?.session_name}`)
+
+      // 关闭旧连接
+      if (currentSessionSSE.value) {
+        currentSessionSSE.value.disconnect()
+      }
+
+      // 建立新连接
+      monitorCurrentSession()
+    }
+  }
+)
+
+// ❌ 错误 - 不切换导致监听错误会话
+// 用户选择新会话后仍监听旧会话的消息
+```
+
+### 18.4 SSE事件类型约束
+
+**强制支持的事件类型**:
+
+| 事件类型 | 触发时机 | 前端行为 |
+|---------|---------|----------|
+| `status_change` | 会话状态变化 | 刷新会话列表和详情 |
+| `manual_message` | 人工消息到达 | 刷新会话详情 |
+| `message` | AI消息(忽略) | 无操作 |
+| `done` | 完成标记 | 无操作 |
+| `error` | 错误事件 | 打印错误日志 |
+
+**实现示例**:
+```typescript
+onMessage: (data) => {
+  console.log(`📨 收到 SSE 消息:`, data.type)
+
+  switch (data.type) {
+    case 'status_change':
+      // 状态变化：刷新会话列表和详情
+      sessionStore.fetchSessions()
+      sessionStore.fetchStats()
+      if (sessionName === sessionStore.selectedSession?.session_name) {
+        sessionStore.fetchSessionDetail(sessionName)
+      }
+      break
+
+    case 'manual_message':
+      // 人工消息：刷新会话详情
+      if (sessionName === sessionStore.selectedSession?.session_name) {
+        sessionStore.fetchSessionDetail(sessionName)
+      }
+      break
+
+    case 'message':
+      // AI 消息（坐席工作台不关心）
+      break
+
+    case 'done':
+      // 完成标记
+      break
+
+    case 'error':
+      console.error(`❌ SSE 错误: ${data.content}`)
+      break
+
+    default:
+      console.log(`ℹ️  未知事件: ${data.type}`)
+  }
+}
+```
+
+### 18.5 自动重连约束
+
+**强制要求 - 3秒重连间隔**:
+
+```typescript
+// ✅ 正确 - 错误后自动重连
+onError: (error) => {
+  console.error(`❌ SSE 连接失败:`, error)
+
+  // 3秒后尝试重连
+  setTimeout(() => {
+    if (isMonitoring.value &&
+        sessionStore.selectedSession?.session_name === sessionName) {
+      monitorCurrentSession()  // 重新建立连接
+    }
+  }, 3000)
+}
+
+// ❌ 错误 - 不重连导致永久断开
+onError: (error) => {
+  console.error(`❌ SSE 连接失败:`, error)
+  // 什么都不做,连接永久断开
+}
+```
+
+### 18.6 资源管理约束
+
+**强制要求 - 组件卸载时清理资源**:
+
+```typescript
+// ✅ 正确 - 完整清理
+const stopMonitoring = () => {
+  console.log('⏹️  停止实时监听')
+  isMonitoring.value = false
+
+  // 清除轮询定时器
+  if (pollTimer.value) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+
+  // 关闭 SSE 连接
+  if (currentSessionSSE.value) {
+    currentSessionSSE.value.disconnect()
+    currentSessionSSE.value = null
+  }
+}
+
+onUnmounted(() => {
+  stopMonitoring()
+})
+
+// ❌ 错误 - 内存泄漏
+onUnmounted(() => {
+  // 忘记清理定时器和SSE连接
+})
+```
+
+### 18.7 性能优化约束
+
+**强制要求 - 轮询间隔不得低于30秒**:
+
+```typescript
+// ✅ 正确 - 30秒轮询
+pollTimer.value = window.setInterval(async () => {
+  console.log('🔄 轮询刷新会话列表 (30s)')
+  await sessionStore.fetchSessions()
+  await sessionStore.fetchStats()
+}, 30000)
+
+// ❌ 错误 - 5秒轮询浪费资源
+setInterval(refreshData, 5000)  // 比30秒多6倍请求
+
+// 性能对比:
+// - 5秒轮询: 12次/分钟 = 720次/小时
+// - 30秒轮询: 2次/分钟 = 120次/小时
+// - 节省: 83% 网络请求
+```
+
+### 18.8 生产环境检查清单
+
+每次部署前必须验证:
+
+- [ ] SSE连接是否支持POST请求？
+- [ ] 是否监听了选中会话变化并自动切换SSE？
+- [ ] 是否处理了所有SSE事件类型(status_change, manual_message)?
+- [ ] 是否实现了3秒自动重连？
+- [ ] 是否在组件卸载时清理了定时器和SSE连接？
+- [ ] 轮询间隔是否 >= 30秒？
+- [ ] 是否同时使用轮询(检测新会话) + SSE(实时消息)?
+
+### 18.9 文件清单
+
+**实施文件**:
+- `/home/yzh/AI客服/鉴权/agent-workbench/src/composables/useAgentWorkbenchSSE.ts` (核心实现)
+- `/home/yzh/AI客服/鉴权/agent-workbench/src/views/Dashboard.vue` (集成使用)
+
+**测试文件**:
+- (待补充) E2E测试验证SSE实时推送
+
+---
+
+**适用场景**:
+- ✅ 坐席工作台实时会话列表更新
+- ✅ 实时接收新消息通知
+- ✅ 状态变化实时推送
+- ✅ 企业生产环境并发要求
+
+**违反后果**:
+- 🟡 资源浪费(短轮询)
+- 🟡 实时性差(轮询延迟)
+- 🟡 内存泄漏(未清理资源)
+- 🟡 SSE连接断开后无法恢复(未重连)

@@ -63,10 +63,23 @@ class Message(BaseModel):
 
 
 class UserProfile(BaseModel):
-    """用户信息"""
+    """用户信息（v2.5 扩展）"""
+    # 基础信息
     nickname: str = "访客"
     email: Optional[str] = None
     vip: bool = False
+
+    # ⭐ v2.5 新增: GDPR 合规字段
+    gdpr_consent: bool = False  # GDPR 同意状态
+    marketing_subscribed: bool = False  # 营销通讯订阅
+
+    # ⭐ v2.5 新增: 地理位置与语言
+    country: str = ""  # 国家代码 (ISO 3166-1, 如 "DE")
+    city: str = ""  # 城市名称
+    language: str = "en"  # 语言代码 (ISO 639-1, 如 "de")
+    currency: str = "USD"  # 货币代码 (ISO 4217, 如 "EUR")
+
+    # 扩展元数据
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

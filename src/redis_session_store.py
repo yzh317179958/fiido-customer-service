@@ -149,6 +149,58 @@ class RedisSessionStore(SessionStateStore):
             logger.error(f"❌ 读取会话失败 {session_name}: {e}")
             return None
 
+    async def get_or_create(
+        self,
+        session_name: str,
+        conversation_id: Optional[str] = None
+    ) -> SessionState:
+        """
+        获取或创建会话状态
+
+        工作流程:
+        1. 尝试从 Redis 获取现有会话
+        2. 如果不存在，创建新会话并保存
+        3. 如果存在且提供了 conversation_id，更新它
+
+        Args:
+            session_name: 会话名称
+            conversation_id: 可选的对话 ID
+
+        Returns:
+            SessionState: 会话状态对象
+        """
+        try:
+            # 1. 尝试获取现有会话
+            state = await self.get(session_name)
+
+            if state:
+                # 2. 如果存在且需要更新 conversation_id
+                if conversation_id and state.conversation_id != conversation_id:
+                    state.conversation_id = conversation_id
+                    state.updated_at = datetime.now(timezone.utc).timestamp()
+                    await self.save(state)
+                    logger.debug(f"🔄 更新会话 conversation_id: {session_name}")
+                return state
+            else:
+                # 3. 创建新会话
+                state = SessionState(
+                    session_name=session_name,
+                    conversation_id=conversation_id,
+                    status=SessionStatus.BOT_ACTIVE
+                )
+                await self.save(state)
+                logger.info(f"✨ 创建新会话: {session_name}")
+                return state
+
+        except Exception as e:
+            logger.error(f"❌ 获取或创建会话失败 {session_name}: {e}")
+            # 返回一个默认的会话状态（降级处理）
+            return SessionState(
+                session_name=session_name,
+                conversation_id=conversation_id,
+                status=SessionStatus.BOT_ACTIVE
+            )
+
     async def delete(self, session_name: str) -> bool:
         """
         删除会话
@@ -242,6 +294,37 @@ class RedisSessionStore(SessionStateStore):
         except Exception as e:
             logger.error(f"❌ 统计会话数量失败 (状态={status}): {e}")
             return 0
+
+    async def get_stats(self) -> dict:
+        """
+        获取会话统计信息
+
+        返回各状态的会话数量统计
+
+        Returns:
+            dict: 包含各状态会话数量的字典
+        """
+        try:
+            stats = {
+                "total": 0,
+                "by_status": {}
+            }
+
+            # 统计各状态的会话数量
+            for status in SessionStatus:
+                count = await self.count_by_status(status)
+                stats["by_status"][status.value] = count
+                stats["total"] += count
+
+            logger.debug(f"📊 会话统计: 总数={stats['total']}")
+            return stats
+
+        except Exception as e:
+            logger.error(f"❌ 获取会话统计失败: {e}")
+            return {
+                "total": 0,
+                "by_status": {status.value: 0 for status in SessionStatus}
+            }
 
     async def get_all_sessions(self) -> List[SessionState]:
         """
