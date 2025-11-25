@@ -2,18 +2,21 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAgentStore } from '@/stores/agentStore'
+import axios from 'axios'
 
 const router = useRouter()
 const agentStore = useAgentStore()
 
-const agentId = ref('')
-const agentName = ref('')
+const username = ref('')
+const password = ref('')
 const loading = ref(false)
 const error = ref('')
 
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+
 const handleLogin = async () => {
-  if (!agentId.value || !agentName.value) {
-    error.value = '请输入坐席ID和姓名'
+  if (!username.value || !password.value) {
+    error.value = '请输入用户名和密码'
     return
   }
 
@@ -21,16 +24,32 @@ const handleLogin = async () => {
   error.value = ''
 
   try {
-    // 🔴 P0-11.1: 调用登录API（简化版，实际应该有JWT认证）
-    await agentStore.login({
-      agentId: agentId.value,
-      agentName: agentName.value
+    // 调用JWT登录API
+    const response = await axios.post(`${API_BASE}/api/agent/login`, {
+      username: username.value,
+      password: password.value
     })
+
+    if (!response.data.success) {
+      throw new Error(response.data.message || '登录失败')
+    }
+
+    // 保存Token（后端返回的是 token 字段，不是 access_token）
+    localStorage.setItem('access_token', response.data.token)
+
+    // 保存用户信息到store
+    await agentStore.login({
+      agentId: response.data.agent.username,
+      agentName: response.data.agent.name,
+      role: response.data.agent.role
+    } as any)
 
     // 跳转到工作台
     router.push('/dashboard')
   } catch (err: any) {
-    error.value = err.message || '登录失败'
+    error.value = err.response?.data?.detail || err.message || '登录失败'
+    // 清除错误的token
+    localStorage.removeItem('access_token')
   } finally {
     loading.value = false
   }
@@ -58,38 +77,36 @@ const handleLogin = async () => {
 
       <form @submit.prevent="handleLogin" class="login-form">
         <div class="form-group">
-          <label for="agentId">
+          <label for="username">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
               <circle cx="12" cy="7" r="4"></circle>
             </svg>
-            坐席ID
+            用户名
           </label>
           <input
-            id="agentId"
-            v-model="agentId"
+            id="username"
+            v-model="username"
             type="text"
-            placeholder="请输入坐席ID，例如：agent_001"
+            placeholder="请输入用户名，例如：admin"
             required
             class="form-input"
           >
         </div>
 
         <div class="form-group">
-          <label for="agentName">
+          <label for="password">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-              <circle cx="9" cy="7" r="4"></circle>
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
             </svg>
-            坐席姓名
+            密码
           </label>
           <input
-            id="agentName"
-            v-model="agentName"
-            type="text"
-            placeholder="请输入您的姓名，例如：小王"
+            id="password"
+            v-model="password"
+            type="password"
+            placeholder="请输入密码"
             required
             class="form-input"
           >

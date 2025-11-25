@@ -56,6 +56,7 @@ export interface Message {
 
 export interface SessionDetail {
   session_name: string
+  conversation_id?: string  // Coze 对话 ID
   status: SessionStatus
   history: Message[]
   escalation?: {
@@ -105,4 +106,81 @@ export interface ManualMessageResponse {
   data: {
     timestamp: number
   }
+}
+
+// ====================
+// 管理员功能类型定义 (v3.1.3+)
+// ====================
+
+/** 坐席角色 */
+export type AgentRole = 'admin' | 'agent'
+
+/** 坐席状态 */
+export type AgentStatus = 'online' | 'offline' | 'busy'
+
+/** 完整坐席信息 */
+export interface Agent {
+  id: string
+  username: string
+  name: string
+  role: AgentRole
+  status: AgentStatus
+  max_sessions: number
+  created_at: number
+  last_login: number
+  avatar_url?: string
+}
+
+/** 创建坐席请求 */
+export interface CreateAgentRequest {
+  username: string
+  password: string
+  name: string
+  role: AgentRole
+  max_sessions?: number
+  avatar_url?: string
+}
+
+/** 修改坐席请求 */
+export interface UpdateAgentRequest {
+  name?: string
+  role?: AgentRole
+  status?: AgentStatus
+  max_sessions?: number
+  avatar_url?: string
+}
+
+/** 修改密码请求 */
+export interface ChangePasswordRequest {
+  old_password: string
+  new_password: string
+}
+
+/** 修改资料请求 */
+export interface UpdateProfileRequest {
+  name?: string
+  avatar_url?: string
+}
+
+/** 重置密码请求 */
+export interface ResetPasswordRequest {
+  new_password: string
+}
+
+/** 坐席列表响应 */
+export interface AgentsListResponse {
+  success: boolean
+  data: {
+    items: Agent[]
+    total: number
+    page: number
+    page_size: number
+  }
+}
+
+/** 坐席操作响应 */
+export interface AgentResponse {
+  success: boolean
+  agent?: Agent
+  message?: string
 }

@@ -11,6 +11,7 @@
   "dependencies": {
     "@types/marked": "^5.0.2",
     "axios": "^1.13.2",
+    "element-plus": "^2.11.8",
     "marked": "^17.0.1",
     "pinia": "^3.0.4",
     "vue": "^3.5.24",

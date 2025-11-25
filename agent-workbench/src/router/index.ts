@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAgentStore } from '@/stores/agentStore'
+import { ElMessage } from 'element-plus'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -16,6 +17,16 @@ const router = createRouter({
       component: () => import('@/views/Dashboard.vue'),
       meta: { requiresAuth: true }
     },
+    // ⭐ v3.1.3 新增：管理员页面
+    {
+      path: '/admin/agents',
+      name: 'AdminManagement',
+      component: () => import('@/views/AdminManagement.vue'),
+      meta: {
+        requiresAuth: true,
+        requiresAdmin: true  // 需要管理员权限
+      }
+    },
     {
       path: '/',
       redirect: '/dashboard'
@@ -27,17 +38,33 @@ const router = createRouter({
 router.beforeEach((to, _from, next) => {
   const agentStore = useAgentStore()
 
+  // 🔴 v3.1.3: 检查是否需要管理员权限
+  if (to.meta.requiresAdmin) {
+    if (!agentStore.isLoggedIn) {
+      next('/login')
+      return
+    }
+    if (agentStore.agentRole !== 'admin') {
+      // 非管理员无法访问管理页面
+      ElMessage.warning('需要管理员权限')
+      next('/dashboard')
+      return
+    }
+  }
+
   // 如果需要认证但未登录，跳转到登录页
   if (to.meta.requiresAuth && !agentStore.isLoggedIn) {
     next('/login')
+    return
   }
+
   // 如果已登录访问登录页，跳转到工作台
-  else if (to.path === '/login' && agentStore.isLoggedIn) {
+  if (to.path === '/login' && agentStore.isLoggedIn) {
     next('/dashboard')
+    return
   }
-  else {
-    next()
-  }
+
+  next()
 })
 
 export default router

@@ -56,9 +56,13 @@ else
     ((FAIL++))
 fi
 
-# 测试3: 会话隔离
+# 测试3: 会话隔离 (使用test_session_isolation.py)
+# 根据 docs/process/会话隔离实现总结.md 的正确方法:
+# - 首次对话不传 conversation_id，由Coze自动生成
+# - 后续对话传入相同的 conversation_id 维持上下文
+# - 验证不同 session_id 获得不同的 conversation_id
 echo -n "测试3: 会话隔离... "
-if python3 tests/test_simple.py > /dev/null 2>&1; then
+if python3 tests/test_session_isolation.py > /dev/null 2>&1; then
     echo -e "${GREEN}✅ 通过${NC}"
     ((PASS++))
 else

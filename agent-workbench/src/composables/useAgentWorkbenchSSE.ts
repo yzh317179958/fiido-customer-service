@@ -29,12 +29,21 @@ interface SSEMessage {
  * 使用 Fetch API 建立 SSE 连接（支持 POST）
  */
 class FetchSSE {
-  private controller: AbortController | null = null
-  private reader: ReadableStreamDefaultReader<Uint8string> | null = null
+  url: string
+  options: {
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+    onMessage?: (data: SSEMessage) => void
+    onError?: (error: any) => void
+    onOpen?: () => void
+  }
+  controller: AbortController | null = null
+  reader: ReadableStreamDefaultReader<Uint8Array> | null = null
 
   constructor(
-    private url: string,
-    private options: {
+    url: string,
+    options: {
       method?: string
       headers?: Record<string, string>
       body?: string
@@ -42,7 +51,10 @@ class FetchSSE {
       onError?: (error: any) => void
       onOpen?: () => void
     }
-  ) {}
+  ) {
+    this.url = url
+    this.options = options
+  }
 
   async connect() {
     try {

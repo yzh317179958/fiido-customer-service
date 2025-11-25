@@ -1,8 +1,8 @@
 # 管理员功能需求文档与任务拆解
 
-> 文档版本: v1.3
+> 文档版本: v1.4
 > 创建时间: 2025-11-24
-> 状态: ✅ P0 已完成，✅ P1 已完成 (ADMIN-07, ADMIN-08)
+> 状态: ✅ P0 已完成，✅ P1 已完成 (包含 ADMIN-09 UI界面)
 > 更新时间: 2025-11-25
 > 依赖: 坐席认证系统 (v2.3.7+)
 
@@ -77,12 +77,13 @@
 - **测试**: 7/7 核心功能测试通过，12/12 回归测试通过
 - **Bug修复**: 修复JWT Token时区问题（UTC+8时区导致Token立即过期）
 
-#### P1 - 自助功能
+#### P1 - 自助功能与管理界面 ✅ 已完成 (2025-11-25)
 
 | 功能ID | 功能名称 | 描述 | 角色 | 状态 |
 |--------|---------|------|------|------|
 | ADMIN-07 | 修改自己密码 | 坐席修改自己的密码 | agent/admin | ✅ 已完成 |
 | ADMIN-08 | 修改个人资料 | 坐席修改自己的信息 | agent/admin | ✅ 已完成 |
+| ADMIN-09 | 管理员UI界面 | 坐席管理前端界面 | admin | ✅ 已完成 |
 
 **ADMIN-07 实施总结** (2025-11-25):
 - **API接口**: POST /api/agent/change-password
@@ -105,6 +106,38 @@
 - **测试结果**: 8/8 全部通过
 - **回归测试**: 12/12 通过
 - **文件修改**: `backend.py` (新增接口), `src/agent_auth.py` (新增UpdateProfileRequest模型)
+
+**ADMIN-09 实施总结** (2025-11-25):
+- **前端页面**: `/admin/agents` - 坐席管理页面
+- **核心组件**:
+  1. `views/AdminManagement.vue` - 主页面（坐席列表、搜索、筛选、分页）
+  2. `components/admin/CreateAgentDialog.vue` - 创建坐席对话框
+  3. `components/admin/EditAgentDialog.vue` - 编辑坐席对话框
+  4. `components/admin/ResetPasswordDialog.vue` - 重置密码对话框
+  5. `components/admin/ChangePasswordDialog.vue` - 修改自己密码对话框
+  6. `components/admin/ProfileDialog.vue` - 修改个人资料对话框
+- **权限控制**:
+  - 路由守卫：requiresAdmin meta标志
+  - Dashboard菜单：仅管理员可见（v-if="agentStore.agentRole === 'admin'"）
+  - 后端API：require_admin() 中间件
+- **功能特性**:
+  - 实时搜索（用户名、姓名、ID）
+  - 角色/状态筛选
+  - 表单验证（密码强度、用户名格式）
+  - 分页支持
+  - 操作按钮：编辑、重置密码、删除
+- **测试结果**:
+  - TypeScript 编译通过（无错误）
+  - 回归测试: 12/12 通过
+- **文件修改**:
+  - `agent-workbench/src/types/index.ts` (添加类型定义)
+  - `agent-workbench/src/stores/adminStore.ts` (新增)
+  - `agent-workbench/src/stores/agentStore.ts` (添加role支持)
+  - `agent-workbench/src/router/index.ts` (添加路由和守卫)
+  - `agent-workbench/src/views/AdminManagement.vue` (新增)
+  - `agent-workbench/src/views/Dashboard.vue` (添加管理员菜单)
+  - `agent-workbench/src/components/admin/` (5个对话框组件)
+
 
 #### P2 - 高级功能
 
@@ -681,9 +714,13 @@ Content-Type: application/json
 | 版本 | 日期 | 更新内容 | 作者 |
 |------|------|---------|------|
 | v1.0 | 2025-11-24 | 初始版本 | Claude Code |
+| v1.1 | 2025-11-25 | P0完成：JWT中间件和管理员CRUD API | Claude Code |
+| v1.2 | 2025-11-25 | P1完成：ADMIN-07修改密码 | Claude Code |
+| v1.3 | 2025-11-25 | P1完成：ADMIN-08修改资料 | Claude Code |
+| v1.4 | 2025-11-25 | P1完成：ADMIN-09管理员UI界面（完整前端实现） | Claude Code |
 
 ---
 
-**文档版本**: v1.0
-**最后更新**: 2025-11-24
+**文档版本**: v1.4
+**最后更新**: 2025-11-25
 **维护者**: Fiido AI 客服开发团队

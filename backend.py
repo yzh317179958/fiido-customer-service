@@ -544,10 +544,13 @@ async def create_new_conversation(request: dict):
         # 提取 access_token
         access_token = token_response.access_token if hasattr(token_response, 'access_token') else token_response
 
-        # 使用 Python SDK 创建 Coze 客户端
+        # 使用 Python SDK 创建 Coze 客户端（配置超时和代理）
+        api_base = os.getenv("COZE_API_BASE", "https://api.coze.com")
+        http_client = httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False)
         temp_coze = Coze(
             auth=TokenAuth(token=access_token),
-            base_url=os.getenv("COZE_API_BASE", "https://api.coze.com")
+            base_url=api_base,
+            http_client=http_client
         )
 
         # 【Coze 约束】创建新 conversation（由 Coze 自动生成 ID）
@@ -604,10 +607,13 @@ async def clear_conversation_history(request: dict):
         # 提取 access_token
         access_token = token_response.access_token if hasattr(token_response, 'access_token') else token_response
 
-        # 使用 Python SDK 创建 Coze 客户端
+        # 使用 Python SDK 创建 Coze 客户端（配置超时和代理）
+        api_base = os.getenv("COZE_API_BASE", "https://api.coze.com")
+        http_client = httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False)
         temp_coze = Coze(
             auth=TokenAuth(token=access_token),
-            base_url=os.getenv("COZE_API_BASE", "https://api.coze.com")
+            base_url=api_base,
+            http_client=http_client
         )
 
         # 【Coze 约束】创建新的 conversation（自动生成新 ID）

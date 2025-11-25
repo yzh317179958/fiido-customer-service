@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import type { SessionSummary } from '@/types'
 
 interface Props {
@@ -8,7 +7,7 @@ interface Props {
   selectedSession?: string
 }
 
-const props = defineProps<Props>()
+defineProps<Props>()
 const emit = defineEmits<{
   (e: 'select', sessionName: string): void
   (e: 'takeover', sessionName: string): void

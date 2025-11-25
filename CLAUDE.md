@@ -119,22 +119,74 @@ access_token = token_manager.get_access_token()  # 缺少session_name!
 
 ### 铁律 4: 会话隔离机制
 
-**强制要求**：每个新会话必须预先调用 `/api/conversation/new` 创建独立的 `conversation_id`
+**强制要求**：基于 `session_name` 实现会话隔离，conversation_id 由 Coze 自动管理
+
+**核心原理** (详见 `docs/process/会话隔离实现总结.md`):
+1. ✅ **首次对话不传 conversation_id**，由 Coze 自动生成
+2. ✅ **后续对话传入相同的 conversation_id** 维持上下文
+3. ✅ **验证标准**: 不同 session_name 获得不同的 conversation_id
 
 ```python
-# ❌ 错误 - 直接发送消息会导致会话隔离失败
-POST /api/chat {"message": "你好", "user_id": "session_a"}
+# ✅ 正确方式 - Coze 自动管理 conversation_id
+@app.post("/api/chat")
+async def chat(request: ChatRequest):
+    session_id = request.user_id or generate_user_id()
 
-# ✅ 正确 - 预先创建 conversation
-POST /api/conversation/new {"session_id": "session_a"}
-# 响应: {"conversation_id": "xxx"}
+    # 获取带 session_name 的 JWT Token
+    access_token = token_manager.get_access_token(session_name=session_id)
 
-POST /api/chat {
-  "message": "你好",
-  "user_id": "session_a",
-  "conversation_id": "xxx"
-}
+    # 从缓存获取 conversation_id（如果有）
+    conversation_id = conversation_cache.get(session_id)
+
+    # 构建 API payload
+    payload = {
+        "workflow_id": WORKFLOW_ID,
+        "app_id": APP_ID,
+        "session_name": session_id,  # ← 关键！会话隔离核心
+        "parameters": {"USER_INPUT": request.message}
+    }
+
+    # 首次对话不传 conversation_id，后续对话才传
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+
+    # 调用 Coze API
+    response = httpx.post(url, json=payload, headers=headers)
+
+    # 保存 Coze 返回的 conversation_id
+    if not conversation_id and returned_conversation_id:
+        conversation_cache[session_id] = returned_conversation_id
+
+# ❌ 错误方式 - 手动生成 conversation_id
+conversation_id = f"conv_{uuid.uuid4()}"  # 禁止！
+
+# ❌ 错误方式 - 依赖首次对话自动生成但不保存
+# 问题：会导致每次对话都生成新 conversation_id，无法维持上下文
 ```
+
+**测试验证** (使用 `tests/test_session_isolation.py`):
+```bash
+# 正确的会话隔离测试流程
+# 1. 用户 A 首次对话（不传 conversation_id）
+POST /api/chat {"message": "我是用户A", "user_id": "session_a"}
+# 响应: {"conversation_id": "7576537373...", "message": "..."}
+
+# 2. 用户 B 首次对话（不传 conversation_id）
+POST /api/chat {"message": "我是用户B", "user_id": "session_b"}
+# 响应: {"conversation_id": "7576539408...", "message": "..."}  ← 不同！
+
+# 3. 用户 A 第二轮（传入 conversation_id）
+POST /api/chat {"message": "我是谁?", "user_id": "session_a", "conversation_id": "7576537373..."}
+# 响应: 应该回答"你是用户A"，证明上下文维持成功
+
+# 验证: conversation_id 不同 ✅
+```
+
+**关键约束**:
+- ❌ 禁止手动生成 conversation_id
+- ❌ 禁止修改 conversation_id 管理逻辑
+- ✅ 必须保存 Coze 返回的 conversation_id
+- ✅ 必须在 JWT 和 API payload 中都传入 session_name
 
 ### 铁律 5: 状态机约束
 
@@ -185,7 +237,109 @@ bot_active → pending_manual → manual_live → bot_active
 
 ---
 
-#### 1.2 约束文档审查清单
+#### 1.2 开发进度管理要求 ⭐ **强制执行**
+
+**触发条件**：任何模块开发（新功能、优化、Bug修复）
+
+**强制要求**：
+
+1. **进度查询规范**
+   - 查询开发进度时，**优先从 `prd/04_任务拆解/` 文件夹下搜索**
+   - 每个模块对应一个独立的 `.md` 文件
+   - 文件命名格式：`{模块名称}_tasks.md`
+
+2. **任务拆解文件结构要求**
+
+每个任务拆解文件必须包含以下章节：
+
+```markdown
+# {模块名称}功能需求文档与任务拆解
+
+> 文档版本: v{版本号}
+> 状态: ✅ P0 已完成 / ⚠️ P0 开发中 / ❌ P0 待开发
+> 更新时间: YYYY-MM-DD
+
+## 1. 功能列表
+
+| 功能ID | 功能名称 | 优先级 | 状态 | 完成时间 |
+|--------|---------|--------|------|---------|
+| {模块}-01 | 功能名称 | P0 | ✅ 已完成 | 2025-11-25 |
+| {模块}-02 | 功能名称 | P1 | ⚠️ 开发中 | - |
+| {模块}-03 | 功能名称 | P2 | ❌ 待开发 | - |
+
+## 2. 当前模块开发进度
+
+**总体进度**: 60% (P0: 100%, P1: 50%, P2: 0%)
+
+**当前阶段**: P1 开发中
+
+**最近更新**:
+- 2025-11-25: 完成 P0 功能，开始 P1 开发
+- 2025-11-24: 创建模块，完成技术方案设计
+
+## 3. 技术方案（同步到 prd/03_技术方案/）
+
+## 4. 约束与原则（同步到 prd/02_约束与原则/）
+
+## 5. API 接口（同步到 prd/03_技术方案/api_contract.md）
+
+## 6. 验收标准
+```
+
+3. **同步更新要求**
+
+开发过程中，必须同步更新以下文件：
+
+| 更新内容 | 同步位置 |
+|---------|---------|
+| 技术方案 | `prd/03_技术方案/{模块名称}_solution.md` 或集成到 `TECHNICAL_SOLUTION_v1.0.md` |
+| 约束与原则 | `prd/02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md` (添加新约束) |
+| API 接口 | `prd/03_技术方案/api_contract.md` (添加新接口) |
+| 任务进度 | `prd/04_任务拆解/{模块名称}_tasks.md` (更新状态和进度) |
+
+4. **开发完成后强制更新**
+
+每次完成开发后，**必须更新开发进度**：
+
+```bash
+# 必须执行的更新
+1. 更新 prd/04_任务拆解/{模块名称}_tasks.md
+   - 修改功能状态（待开发 → 开发中 → 已完成）
+   - 更新完成时间
+   - 更新总体进度百分比
+
+2. 如有新增约束，更新 prd/02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md
+
+3. 如有新增API，更新 prd/03_技术方案/api_contract.md
+
+4. 提交并推送到 GitHub 仓库，包含进度更新
+```
+
+**示例**：
+```markdown
+# 管理员功能开发完成 v3.1.3
+
+更新内容：
+- ✅ P0 功能全部完成（坐席CRUD、权限控制）
+- ✅ P1 功能全部完成（修改密码、修改资料）
+- 📄 更新 admin_management_tasks.md 进度为 100%
+- 📄 添加约束19-21到 CONSTRAINTS_AND_PRINCIPLES.md
+- 📄 添加7个新API到 api_contract.md
+```
+
+5. **检查清单**
+
+开发完成后，执行以下检查：
+
+- [ ] `prd/04_任务拆解/{模块名称}_tasks.md` 状态已更新
+- [ ] 新增约束已写入 `prd/02_约束与原则/`
+- [ ] 新增API已写入 `prd/03_技术方案/api_contract.md`
+- [ ] Git commit 完成并已推送到远程仓库，commit message 包含进度信息
+- [ ] 回归测试全部通过
+
+---
+
+#### 1.3 约束文档审查清单
 - [ ] 阅读 `prd/02_约束与原则/CONSTRAINTS_AND_PRINCIPLES.md`
 - [ ] 阅读 `prd/03_技术方案/TECHNICAL_SOLUTION_v1.0.md`
 - [ ] 确认新功能是否涉及 Coze API 调用

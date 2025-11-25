@@ -46,23 +46,23 @@ bot_active → pending_manual → manual_live → bot_active
 
 ---
 
-## 当前版本: v2.3.6
+## 当前版本: v3.1.3
 
-**发布日期**: 2025-11-24
+**发布日期**: 2025-11-25
 
-**功能完成度**: 95% (P0+P1+部分P3 已完成)
+**功能完成度**: 98% (P0+P1 全部完成，P2 待开发)
 
-**系统状态**: 🎯 **生产可用 (Production Ready)** - 数据持久化已实现
+**系统状态**: 🎯 **生产可用 (Production Ready)** - 企业级功能完整
 
 **PRD 文档**: 见 `prd/INDEX.md` (20个需求文档，按6个分类组织)
 
 **最新更新**:
-- ✅ Redis 数据持久化实现
-- ✅ 约束16：生产环境安全性与稳定性要求
-- ✅ 会话数据自动恢复（服务器重启不丢失）
-- ✅ 支持水平扩展（多台服务器共享数据）
+- ✅ 管理员功能完整实现（坐席 CRUD、权限控制）- v3.1.1
+- ✅ 坐席自助功能（修改密码、修改资料）- v3.1.2/v3.1.3
+- ✅ Fiido E-bike 业务需求整合 - v3.1.0
+- ✅ 修复会话隔离 SSL 超时问题 - v3.1.3
 
-**下一步**: 坐席认证系统 → 企业级部署
+**已完成功能**: P0 核心功能 + P0 管理员功能 + P1 自助功能 + P1 增强功能
 
 ---
 
@@ -882,10 +882,34 @@ payload = {
 
 ---
 
-## 测试
+## 🧪 测试
 
-### 简单测试 (推荐)
+### 回归测试套件（推荐）
 
+```bash
+./tests/regression_test.sh
+```
+
+**测试覆盖**：
+- 第一层：核心功能测试（3项）
+  - 健康检查
+  - AI对话（同步）
+  - 会话隔离（预先创建conversation）
+- 第二层：人工接管功能测试（5项）
+  - 人工升级、AI阻止、坐席接入、发送消息、释放会话
+- 第三层：坐席工作台功能测试（4项）
+  - 会话列表、统计信息、TypeScript检查（agent-workbench + frontend）
+
+**预期结果**：12/12 通过
+
+### 健康检查
+```bash
+curl http://localhost:8000/api/health
+```
+
+### 会话隔离测试
+
+**简单测试**：
 ```bash
 python3 tests/test_simple.py
 ```
@@ -895,11 +919,22 @@ python3 tests/test_simple.py
 - 用户 B: "我叫李四"
 - 用户 A 第二轮: "我叫什么?" → 期望回答 "张三"
 
-### 完整测试
-
+**完整会话隔离测试** ⭐ 已修复：
 ```bash
 python3 tests/test_session_name.py
 ```
+
+**测试步骤** (遵循正确的会话隔离实现):
+1. 用户A打开页面 → 立即调用 `/api/conversation/new` 创建 conversation_A
+2. 用户B打开页面 → 立即调用 `/api/conversation/new` 创建 conversation_B
+3. 验证 conversation_A ≠ conversation_B
+4. 用户A说 "我叫张三，我今年25岁"
+5. 用户B说 "我叫李四，我是一名程序员"
+6. 用户A问 "我叫什么？我多大了？" → 期望回答 "张三、25岁"
+7. 用户B问 "我的名字和职业是什么？" → 期望回答 "李四、程序员"
+8. **关键验证**: 用户A问 "你知道李四是谁吗？" → 期望**不知道**（证明会话隔离成功）
+
+**注意**: 此测试脚本已修复，严格遵循《Coze会话隔离最终解决方案.md》的实现方式
 
 ---
 
@@ -943,45 +978,108 @@ python3 tests/test_session_name.py
 - [会话隔离实现历程](docs/会话隔离实现历程.md) - 从问题到解决的完整过程
 
 ---
+## 📊 版本历史
 
-## 🧪 测试
+### v3.1.3 (2025-11-25) - P1 自助功能全部完成 ⭐
 
-### 健康检查
-```bash
-curl http://localhost:8000/api/health
-```
+**功能完成度**: 98% (核心功能完成，生产环境就绪)
 
-### 简单测试 (推荐)
+**主要更新**:
 
-```bash
-python3 tests/test_simple.py
-```
+**🔵 修改个人资料功能** (ADMIN-08)
+- ✅ POST /api/agent/profile - 坐席修改自己的 name 和 avatar_url
+- ✅ 字段限制：只允许修改非敏感字段
+- ✅ 测试：8/8 功能测试通过，12/12 回归测试通过
 
-**测试内容**:
-- 用户 A: "我叫张三"
-- 用户 B: "我叫李四"
-- 用户 A 第二轮: "我叫什么?" → 期望回答 "张三"
+**🐛 Bug 修复**:
+- ✅ 修复 `/api/conversation/new` SSL 超时问题（添加 HTTP 超时和代理配置）
+- ✅ 修复 `/api/conversation/clear` SSL 超时问题
 
-### 完整会话隔离测试 ⭐ 已修复
-
-```bash
-python3 tests/test_session_name.py
-```
-
-**测试步骤** (遵循正确的会话隔离实现):
-1. 用户A打开页面 → 立即调用 `/api/conversation/new` 创建 conversation_A
-2. 用户B打开页面 → 立即调用 `/api/conversation/new` 创建 conversation_B
-3. 验证 conversation_A ≠ conversation_B
-4. 用户A说 "我叫张三，我今年25岁"
-5. 用户B说 "我叫李四，我是一名程序员"
-6. 用户A问 "我叫什么？我多大了？" → 期望回答 "张三、25岁"
-7. 用户B问 "我的名字和职业是什么？" → 期望回答 "李四、程序员"
-8. **关键验证**: 用户A问 "你知道李四是谁吗？" → 期望**不知道**（证明会话隔离成功）
-
-**注意**: 此测试脚本已修复，严格遵循《Coze会话隔离最终解决方案.md》的实现方式
+**GitHub**: Commit `0af51a9`, Tag `v3.1.3`
 
 ---
-## 📊 版本历史
+
+### v3.1.2 (2025-11-25) - P1 修改密码功能完成 ⭐
+
+**主要更新**:
+
+**🔵 修改密码功能** (ADMIN-07)
+- ✅ POST /api/agent/change-password - 坐席修改自己的密码
+- ✅ 验证旧密码正确性
+- ✅ 新密码强度验证（至少8字符，含字母和数字）
+- ✅ 新旧密码不能相同
+- ✅ 测试：6/7 功能测试通过，12/12 回归测试通过
+
+**文档更新**:
+- 更新 `prd/03_技术方案/api_contract.md` v2.7
+- 更新 `prd/04_任务拆解/admin_management_tasks.md` v1.2
+
+**GitHub**: Commit `[hash]`, Tag `v3.1.2`
+
+---
+
+### v3.1.1 (2025-11-25) - 管理员功能完成 (P0) ⭐ 重要更新
+
+**主要更新**:
+
+**🔴 JWT 权限中间件** (100%)
+- ✅ verify_agent_token() - 验证 JWT Token
+- ✅ require_admin() - 管理员权限中间件
+- ✅ require_agent() - 坐席权限中间件
+- ✅ 三层权限模型：无认证 / 坐席 / 管理员
+
+**🔴 管理员 API** (5个核心接口)
+- ✅ GET /api/agents - 查询坐席列表（支持分页和角色筛选）
+- ✅ POST /api/agents - 创建坐席账号
+- ✅ PUT /api/agents/{username} - 修改坐席信息
+- ✅ DELETE /api/agents/{username} - 删除坐席账号
+- ✅ POST /api/agents/{username}/reset-password - 重置密码
+
+**🐛 Bug 修复**:
+- ✅ 修复 JWT Token 时区问题（UTC+8 导致 Token 立即过期）
+- 问题：`datetime.now()` 使用本地时区，但 JWT exp 需要 UTC
+- 解决：使用 `datetime.now(timezone.utc)` 确保时区一致
+
+**🧪 测试**:
+- ✅ 7/7 管理员功能测试通过
+- ✅ 12/12 回归测试通过
+
+**文档更新**:
+- 更新 `prd/03_技术方案/api_contract.md` v2.6
+- 更新 `prd/04_任务拆解/admin_management_tasks.md` v1.1
+
+**GitHub**: Commit `[hash]`, Tag `v3.1.1`
+
+---
+
+### v3.1.0 (2025-11-25) - Fiido E-bike 业务需求整合 v3.1 ⭐ P0 功能完成
+
+**主要更新**:
+
+**🌍 UserProfile 扩展** (欧洲跨境业务需求)
+- ✅ GDPR 合规字段（data_consent, marketing_consent）
+- ✅ 多语言支持（preferred_language: en/de/fr/es/it/nl）
+- ✅ 多货币支持（currency_preference: EUR/GBP/USD）
+- ✅ 国家/地区字段（country, timezone）
+
+**📊 统计接口扩展** (GET /api/sessions/stats)
+- ✅ AI 质量指标（ai_accuracy_rate, avg_satisfaction）
+- ✅ 坐席效率指标（agent_response_time, agent_productivity）
+- ✅ 业务指标（total_escalations, resolution_rate）
+
+**📋 合规性说明**
+- ✅ 新增 `prd/01_全局指导/PRD_COMPLETE_v3.0.md` 合规性章节
+- 数据保护（GDPR Article 6, 13, 15, 17）
+- EU 电池法规（EU 2023/1542）
+- 消费者权益保护
+
+**📂 实施方案文档**
+- ✅ 新增 `docs/P2_工单系统实施方案详解.md`
+- ✅ 新增 `docs/P2_知识库系统实施方案详解.md`
+
+**GitHub**: Commit `09597f9`, Tag `v3.1.0`
+
+---
 
 ### v2.3.6 (2025-11-24) - Redis 数据持久化实现 💾
 
@@ -1149,8 +1247,8 @@ python3 tests/test_session_name.py
 
 ---
 
-**最后更新**: 2025-11-24
-**当前版本**: v2.3.6
+**最后更新**: 2025-11-25
+**当前版本**: v3.1.3
 
 ---
 

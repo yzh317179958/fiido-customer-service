@@ -13,7 +13,7 @@ const sessionStore = useSessionStore()
 const router = useRouter()
 
 // 【阶段2】使用 SSE 实时推送替代轮询
-const { isMonitoring, startMonitoring, stopMonitoring } = useAgentWorkbenchSSE()
+const { startMonitoring, stopMonitoring } = useAgentWorkbenchSSE()
 
 // 当前筛选状态
 const currentFilter = ref<SessionStatus | 'all'>('pending_manual')
@@ -123,21 +123,21 @@ const handleFilterChange = async (filter: SessionStatus | 'all') => {
   }
 }
 
-// 刷新数据
-const refreshData = async () => {
-  const status = currentFilter.value === 'all' ? undefined : currentFilter.value
-  await Promise.all([
-    sessionStore.fetchSessions(status),
-    sessionStore.fetchStats()
-  ])
-
-  // 如果有选中的会话，也刷新会话详情（获取新消息）
-  if (sessionStore.currentSessionName) {
-    await sessionStore.fetchSessionDetail(sessionStore.currentSessionName)
-    // 自动滚动到底部
-    await scrollToBottom()
-  }
-}
+// 刷新数据 - 已由SSE替代，保留备用
+// const refreshData = async () => {
+//   const status = currentFilter.value === 'all' ? undefined : currentFilter.value
+//   await Promise.all([
+//     sessionStore.fetchSessions(status),
+//     sessionStore.fetchStats()
+//   ])
+//
+//   // 如果有选中的会话，也刷新会话详情（获取新消息）
+//   if (sessionStore.currentSessionName) {
+//     await sessionStore.fetchSessionDetail(sessionStore.currentSessionName)
+//     // 自动滚动到底部
+//     await scrollToBottom()
+//   }
+// }
 
 // 滚动到底部
 const scrollToBottom = async () => {
@@ -278,6 +278,23 @@ onUnmounted(() => {
           <span class="agent-name">{{ agentStore.agentName }}</span>
           <span class="agent-id">{{ agentStore.agentId }}</span>
         </div>
+        <!-- 管理员菜单 (v3.1.3+) -->
+        <el-dropdown v-if="agentStore.agentRole === 'admin'" trigger="click" class="admin-dropdown">
+          <button class="admin-menu-button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/>
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+            </svg>
+            管理
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item @click="router.push('/admin/agents')">
+                <span>👥 坐席管理</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <button @click="handleLogout" class="logout-button">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
@@ -646,6 +663,38 @@ onUnmounted(() => {
 .agent-id {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.75);
+}
+
+/* 管理员菜单按钮 (v3.1.3+) */
+.admin-dropdown {
+  margin-right: 12px;
+}
+
+.admin-menu-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  font-size: 14px;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.admin-menu-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.admin-menu-button:active {
+  transform: translateY(0);
 }
 
 .logout-button {

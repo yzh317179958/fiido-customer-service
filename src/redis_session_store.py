@@ -326,6 +326,58 @@ class RedisSessionStore(SessionStateStore):
                 "by_status": {status.value: 0 for status in SessionStatus}
             }
 
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[SessionState]:
+        """
+        获取所有会话列表（分页）
+
+        Args:
+            limit: 每页数量
+            offset: 偏移量
+
+        Returns:
+            List[SessionState]: 会话列表
+        """
+        try:
+            # 获取所有会话
+            all_sessions = await self.get_all_sessions()
+
+            # 按更新时间倒序排序
+            all_sessions.sort(key=lambda x: x.updated_at, reverse=True)
+
+            # 分页
+            paginated_sessions = all_sessions[offset:offset + limit]
+
+            logger.debug(f"📋 获取会话列表: {len(paginated_sessions)}/{len(all_sessions)} 个")
+            return paginated_sessions
+
+        except Exception as e:
+            logger.error(f"❌ 获取会话列表失败: {e}")
+            return []
+
+    async def count_all(self) -> int:
+        """
+        统计所有会话数量
+
+        Returns:
+            int: 会话总数
+        """
+        try:
+            # 使用 SCAN 统计所有 session: 前缀的 key
+            count = 0
+            for _ in self.redis.scan_iter("session:*", count=100):
+                count += 1
+
+            logger.debug(f"📊 会话总数: {count}")
+            return count
+
+        except Exception as e:
+            logger.error(f"❌ 统计会话总数失败: {e}")
+            return 0
+
     async def get_all_sessions(self) -> List[SessionState]:
         """
         获取所有会话（用于统计和管理）

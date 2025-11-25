@@ -433,8 +433,9 @@ const loadSessionHistory = async () => {
       if (session.escalation) {
         chatStore.setEscalationInfo({
           reason: session.escalation.reason,
-          timestamp: session.escalation.timestamp,
-          context: session.escalation.context
+          details: session.escalation.details || '',
+          severity: session.escalation.severity || 'medium',
+          trigger_at: session.escalation.trigger_at
         })
         console.log('✅ 恢复升级信息:', session.escalation.reason)
       }

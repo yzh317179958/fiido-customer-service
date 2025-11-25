@@ -13,6 +13,9 @@ export const useSessionStore = defineStore('session', () => {
   const currentSession = ref<SessionDetail | null>(null)
   const currentSessionName = ref<string>('')
 
+  // 选中的会话（用于SSE监听）
+  const selectedSession = computed(() => currentSession.value)
+
   // 统计信息
   const stats = ref({
     total_sessions: 0,
@@ -316,6 +319,7 @@ export const useSessionStore = defineStore('session', () => {
     // 计算属性
     pendingCount,
     manualLiveCount,
+    selectedSession,
 
     // 方法
     fetchSessions,
