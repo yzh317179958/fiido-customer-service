@@ -1,16 +1,25 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, nextTick, computed } from 'vue'
+import { onMounted, onUnmounted, ref, nextTick, computed, watch } from 'vue'
 import { useAgentStore } from '@/stores/agentStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useRouter } from 'vue-router'
 import SessionList from '@/components/SessionList.vue'
 import QuickReplies from '@/components/QuickReplies.vue'
-import type { SessionStatus } from '@/types'
+import CustomerProfile from '@/components/customer/CustomerProfile.vue'
+import type { SessionStatus, CustomerProfile as CustomerProfileType } from '@/types'
 import { useAgentWorkbenchSSE } from '@/composables/useAgentWorkbenchSSE'
+import axios from 'axios'
 
 const agentStore = useAgentStore()
 const sessionStore = useSessionStore()
 const router = useRouter()
+
+// 客户信息相关状态
+const customerProfile = ref<CustomerProfileType | null>(null)
+const loadingCustomer = ref(false)
+const currentTab = ref<'chat' | 'customer' | 'history'>('chat')  // 右侧 Tab 切换
+
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
 // 【阶段2】使用 SSE 实时推送替代轮询
 const { startMonitoring, stopMonitoring } = useAgentWorkbenchSSE()
@@ -95,7 +104,44 @@ const handleLogout = () => {
 // 处理会话选择
 const handleSelectSession = async (sessionName: string) => {
   await sessionStore.fetchSessionDetail(sessionName)
+  // 选中会话后自动加载客户信息
+  fetchCustomerProfile(sessionName)
 }
+
+// 获取客户画像
+const fetchCustomerProfile = async (customerId: string) => {
+  try {
+    loadingCustomer.value = true
+    const token = localStorage.getItem('access_token')
+
+    const response = await axios.get(
+      `${API_BASE}/api/customers/${customerId}/profile`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+
+    if (response.data.success) {
+      customerProfile.value = response.data.data
+    }
+  } catch (error: any) {
+    console.error('获取客户信息失败:', error)
+    customerProfile.value = null
+  } finally {
+    loadingCustomer.value = false
+  }
+}
+
+// 监听当前会话变化
+watch(() => sessionStore.currentSessionName, (newSession) => {
+  if (newSession) {
+    fetchCustomerProfile(newSession)
+  } else {
+    customerProfile.value = null
+  }
+})
 
 // 处理接入会话
 const handleTakeover = async (sessionName: string) => {
@@ -498,6 +544,45 @@ onUnmounted(() => {
                 {{ isSending ? '发送中...' : '发送' }}
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧：客户信息侧边栏 (v3.2.0+) -->
+      <div v-if="sessionStore.currentSession" class="customer-sidebar">
+        <div class="sidebar-tabs">
+          <button
+            :class="['tab-button', { active: currentTab === 'customer' }]"
+            @click="currentTab = 'customer'"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+            客户信息
+          </button>
+          <button
+            :class="['tab-button', { active: currentTab === 'history' }]"
+            @click="currentTab = 'history'"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            对话历史
+          </button>
+        </div>
+
+        <div class="sidebar-content">
+          <CustomerProfile
+            v-if="currentTab === 'customer'"
+            :customer="customerProfile"
+            :loading="loadingCustomer"
+          />
+          <div v-else-if="currentTab === 'history'" class="history-panel">
+            <p style="padding: 20px; text-align: center; color: #718096;">
+              对话历史功能开发中...
+            </p>
           </div>
         </div>
       </div>
@@ -1389,5 +1474,75 @@ onUnmounted(() => {
 .send-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 右侧客户信息侧边栏 (v3.2.0+) */
+.customer-sidebar {
+  width: 320px;
+  background: white;
+  border-left: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+.tab-button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border: none;
+  background: transparent;
+  color: #718096;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.tab-button svg {
+  transition: all 0.2s;
+}
+
+.tab-button:hover {
+  background: rgba(78, 205, 196, 0.05);
+  color: #4ECDC4;
+}
+
+.tab-button.active {
+  color: #4ECDC4;
+  background: white;
+}
+
+.tab-button.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #4ECDC4;
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+.history-panel {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 </style>

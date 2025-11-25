@@ -184,3 +184,34 @@ export interface AgentResponse {
   agent?: Agent
   message?: string
 }
+
+// ====================
+// 客户信息与业务上下文类型定义 (v3.2.0+)
+// ====================
+
+/** 来源渠道 */
+export type SourceChannel = 'shopify_organic' | 'shopify_campaign' | 'amazon' | 'dealer' | 'other'
+
+/** 客户画像 */
+export interface CustomerProfile {
+  customer_id: string
+  name: string
+  email: string
+  phone: string
+  country: string
+  city: string
+  language_preference: string  // en/de/fr/it/es
+  payment_currency: string     // EUR/GBP
+  source_channel: SourceChannel
+  gdpr_consent: boolean
+  marketing_subscribed: boolean
+  vip_status?: string
+  avatar_url?: string
+  created_at: number
+}
+
+/** 客户画像响应 */
+export interface CustomerProfileResponse {
+  success: boolean
+  data: CustomerProfile
+}

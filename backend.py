@@ -2947,6 +2947,66 @@ async def update_profile(
         )
 
 
+# ====================
+# 客户信息与业务上下文 API (v3.2.0+)
+# ====================
+
+@app.get("/api/customers/{customer_id}/profile")
+async def get_customer_profile(
+    customer_id: str,
+    agent: dict = Depends(require_agent)
+):
+    """
+    获取客户画像信息
+
+    【MVP 阶段】返回模拟数据，后续集成 Shopify API
+
+    Args:
+        customer_id: 客户ID（当前为 session_id）
+        agent: 坐席信息（来自 JWT）
+
+    Returns:
+        客户画像数据
+    """
+    try:
+        # MVP 阶段：返回模拟数据
+        # TODO: 后续集成 Shopify API 获取真实客户数据
+
+        # 从 session_id 提取基本信息作为演示
+        mock_customer = {
+            "customer_id": customer_id,
+            "name": "John Doe",
+            "email": "john.doe@example.com",
+            "phone": "+49 123 456789",
+            "country": "DE",
+            "city": "Berlin",
+            "language_preference": "de",
+            "payment_currency": "EUR",
+            "source_channel": "shopify_organic",
+            "gdpr_consent": True,
+            "marketing_subscribed": False,
+            "vip_status": "gold",
+            "avatar_url": None,
+            "created_at": int(time.time()) - 86400 * 30  # 30 天前注册
+        }
+
+        print(f"✅ 获取客户画像: customer_id={customer_id}, agent={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": mock_customer
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取客户画像失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取客户画像失败: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
 
