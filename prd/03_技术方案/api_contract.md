@@ -675,8 +675,413 @@ if (response.status === 401) {
 
 ---
 
-**最后更新**: 2025-11-25
-**文档版本**: v2.8 (新增修改个人资料功能)
+**最后更新**: 2025-11-26
+**文档版本**: v2.9 (新增工单系统 API)
+
+---
+
+## 🎫 工单系统 API ⭐ v2.9 新增 (2025-11-26)
+
+**文档版本**: v2.9
+**新增时间**: 2025-11-26
+**负责模块**: 工单系统
+**Coze 依赖**: ❌ 无依赖 (本地工单管理)
+
+### 1. `POST /api/tickets` - 创建工单
+
+**用途**: 从会话或手动创建工单
+
+**Request Body**:
+```json
+{
+  "session_id": "session_abc123",        // 可选，关联会话
+  "title": "电池续航异常",              // 必需，工单标题
+  "description": "客户反馈续航不足50公里", // 必需，详细描述
+  "category": "technical",               // 必需，工单分类
+  "priority": "high",                    // 可选，默认 normal
+  "customer_id": "customer_001",         // 必需，客户ID
+  "order_id": "order_123",               // 可选，关联订单
+  "bike_model": "C11 Pro",               // 可选，车型
+  "vin": "VIN123456789",                 // 可选，车辆VIN
+  "department": "technical"              // 必需，所属部门
+}
+```
+
+**工单分类 (category)**:
+- `pre_sales` - 售前配置
+- `order_modify` - 订单修改
+- `shipping` - 物流异常
+- `after_sales` - 售后维修
+- `compliance` - 合规申诉
+- `technical` - 技术故障
+- `returns` - 退换货
+- `warranty` - 保修
+
+**优先级 (priority)**:
+- `low` - 低
+- `normal` - 普通 (默认)
+- `high` - 高
+- `urgent` - 紧急
+
+**部门 (department)**:
+- `sales_eu` - 欧洲售前
+- `service_cn` - 深圳售后
+- `warehouse` - 配件仓
+- `compliance` - 合规团队
+- `technical` - 技术支持
+- `logistics` - 物流团队
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_33a756d7db794ebe",
+    "ticket_number": "TK-202500001",      // 自动生成的工单编号
+    "title": "电池续航异常",
+    "status": "pending",
+    "sla_deadline": 1764212850.848,       // SLA截止时间(UTC时间戳)
+    "sla_status": "within",               // within/warning/breached
+    "ai_summary": "...",                  // 自动提取的会话摘要(如有)
+    "activity_log": [
+      {
+        "action": "created",
+        "description": "工单创建: 电池续航异常",
+        "operator_name": "admin",
+        "timestamp": 1764126450.848
+      }
+    ]
+  }
+}
+```
+
+**权限**: require_agent (任何坐席)
+
+---
+
+### 2. `GET /api/tickets/{ticket_id}` - 获取工单详情
+
+**用途**: 查询工单完整信息
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_xxx",
+    "ticket_number": "TK-202500001",
+    "title": "电池续航异常",
+    "description": "...",
+    "status": "in_progress",
+    "category": "technical",
+    "priority": "high",
+    "department": "technical",
+    "assignee_id": "agent_001",
+    "assignee_name": "客服小王",
+    "sla_deadline": 1764212850.848,
+    "sla_status": "within",
+    "comments": [
+      {
+        "id": "comment_xxx",
+        "content": "已联系客户",
+        "author_name": "客服小王",
+        "created_at": 1764126500.0,
+        "is_internal": false
+      }
+    ],
+    "attachments": [],
+    "activity_log": [...]
+  }
+}
+```
+
+**Response (404 Not Found)**:
+```json
+{
+  "detail": "工单不存在: ticket_xxx"
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 3. `GET /api/tickets` - 查询工单列表
+
+**用途**: 多条件查询工单，支持分页
+
+**Query Parameters**:
+- `status` (string, 可选): 工单状态
+  - `pending` - 待接单
+  - `in_progress` - 处理中
+  - `waiting_customer` - 待客户
+  - `waiting_parts` - 待配件
+  - `resolved` - 已解决
+  - `closed` - 已关闭
+- `department` (string, 可选): 部门
+- `assignee_id` (string, 可选): 负责人ID
+- `category` (string, 可选): 工单分类
+- `priority` (string, 可选): 优先级
+- `page` (int, 默认1): 页码
+- `page_size` (int, 默认20): 每页数量
+
+**Request URL**:
+```
+GET /api/tickets?status=pending&department=technical&page=1&page_size=20
+```
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "ticket_id": "ticket_xxx",
+        "ticket_number": "TK-202500001",
+        "title": "电池续航异常",
+        "status": "pending",
+        "priority": "high",
+        "sla_status": "within",
+        "created_at": 1764126450.848
+      }
+    ],
+    "total": 15,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 1
+  }
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 4. `PATCH /api/tickets/{ticket_id}` - 更新工单信息
+
+**用途**: 修改工单的基本信息
+
+**Request Body**:
+```json
+{
+  "title": "电池续航异常 - 需紧急更换",  // 可选
+  "description": "更新后的描述",         // 可选
+  "priority": "urgent",                  // 可选
+  "tags": ["urgent", "vip"]              // 可选
+}
+```
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_xxx",
+    "title": "电池续航异常 - 需紧急更换",
+    "priority": "urgent",
+    "version": 1  // 版本号递增
+  }
+}
+```
+
+**Response (409 Conflict)**:
+```json
+{
+  "detail": "工单已被其他操作修改,请刷新后重试"
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 5. `POST /api/tickets/{ticket_id}/assign` - 指派工单
+
+**用途**: 将工单指派给坐席或部门
+
+**Request Body**:
+```json
+{
+  "assignee_id": "agent_001",
+  "assignee_name": "客服小王",
+  "department": "technical"
+}
+```
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_xxx",
+    "assignee_id": "agent_001",
+    "assignee_name": "客服小王",
+    "department": "technical",
+    "activity_log": [
+      {
+        "action": "assigned",
+        "description": "工单从 未分配 指派给 客服小王 (technical)",
+        "operator_name": "admin",
+        "timestamp": 1764126500.0
+      }
+    ]
+  }
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 6. `POST /api/tickets/{ticket_id}/status` - 更新工单状态
+
+**用途**: 变更工单状态，推进工作流
+
+**Request Body**:
+```json
+{
+  "status": "resolved",
+  "comment": "已更换电池，客户确认问题解决"  // 可选
+}
+```
+
+**工单状态流转规则**:
+```
+pending → in_progress → resolved → closed
+          ↓
+        waiting_customer
+          ↓
+        waiting_parts
+```
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_xxx",
+    "status": "resolved",
+    "resolved_at": 1764126600.0,
+    "activity_log": [
+      {
+        "action": "status_changed",
+        "description": "状态从 in_progress 变更为 resolved",
+        "operator_name": "客服小王",
+        "timestamp": 1764126600.0,
+        "details": {
+          "comment": "已更换电池，客户确认问题解决"
+        }
+      }
+    ]
+  }
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 7. `POST /api/tickets/{ticket_id}/comments` - 添加工单评论
+
+**用途**: 添加评论，支持@提到和内部/外部评论
+
+**Request Body**:
+```json
+{
+  "content": "@warehouse_manager 请确认库存是否充足",
+  "mentions": ["warehouse_manager"],     // 可选，@提到的用户
+  "is_internal": true                    // 可选，是否内部评论(默认false)
+}
+```
+
+**Response (200 OK)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_xxx",
+    "comments": [
+      {
+        "id": "comment_xxx",
+        "content": "@warehouse_manager 请确认库存是否充足",
+        "author_id": "agent_001",
+        "author_name": "客服小王",
+        "mentions": ["warehouse_manager"],
+        "created_at": 1764126700.0,
+        "is_internal": true
+      }
+    ],
+    "activity_log": [
+      {
+        "action": "commented",
+        "description": "客服小王 添加了评论",
+        "timestamp": 1764126700.0
+      }
+    ]
+  }
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 8. `GET /api/sessions/{session_name}/ticket` - 根据会话查询工单
+
+**用途**: 检查会话是否已创建工单
+
+**Response (200 OK - 有工单)**:
+```json
+{
+  "success": true,
+  "data": {
+    "ticket_id": "ticket_xxx",
+    "ticket_number": "TK-202500001",
+    "session_id": "session_abc123",
+    "status": "in_progress"
+  }
+}
+```
+
+**Response (200 OK - 无工单)**:
+```json
+{
+  "success": true,
+  "data": null
+}
+```
+
+**权限**: require_agent
+
+---
+
+### 工单系统特性总结
+
+#### 自动功能
+- ✅ 工单编号自动生成 (TK-202500001)
+- ✅ SLA 自动计算 (基于分类和优先级)
+- ✅ 活动日志自动记录 (所有操作)
+- ✅ 会话摘要自动提取 (如有关联)
+
+#### SLA 配置
+
+| 分类 | 优先级 | 响应时间 | 解决时间 |
+|------|--------|----------|----------|
+| 售前配置 | normal | 2小时 | 24小时 |
+| 订单修改 | high | 30分钟 | 4小时 |
+| 物流异常 | high | 1小时 | 12小时 |
+| 售后维修 | normal | 4小时 | 48小时 |
+| 技术故障 | urgent | 15分钟 | 8小时 |
+| 合规申诉 | high | 2小时 | 24小时 |
+
+#### 并发控制
+- ✅ 乐观锁 (版本号机制)
+- ✅ asyncio.Lock (原子性保证)
+
+#### 数据存储
+- ✅ 内存存储 (MVP)
+- 🔄 Redis 存储 (未来扩展)
 
 ---
 

@@ -59,6 +59,15 @@ from src.agent_auth import (
     Agent
 )
 
+# 导入 Shopify 客户端模块 (v3.3.0+)
+from src.shopify_client import (
+    init_shopify_client,
+    get_shopify_client,
+    extract_vip_from_tags,
+    extract_language_from_tags,
+    extract_source_from_tags
+)
+
 # 加载环境变量
 load_dotenv()
 
@@ -272,12 +281,26 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  坐席认证系统初始化失败: {str(e)}")
         print(f"   坐席登录功能将不可用")
 
+    # 初始化 Shopify 客户端 (v3.3.0+)
+    try:
+        print(f"🛍️  初始化 Shopify 客户端...")
+        init_shopify_client()
+    except Exception as e:
+        print(f"⚠️  Shopify 客户端初始化失败: {str(e)}")
+        print(f"   系统将使用 mock 数据")
+
     print(f"{'=' * 60}\n")
 
     yield
 
     # 关闭时清理
     print("👋 关闭 Coze 客户端")
+
+    # 关闭 Shopify 客户端连接
+    shopify = get_shopify_client()
+    if shopify:
+        shopify.close()
+        print("👋 关闭 Shopify 客户端")
 
 
 # 创建 FastAPI 应用
@@ -2959,52 +2982,107 @@ async def get_customer_profile(
     """
     获取客户画像信息
 
-    【MVP 阶段】返回模拟数据，后续集成 Shopify API
+    【v3.3.0】集成 Shopify API 获取真实客户数据
 
     Args:
-        customer_id: 客户ID（当前为 session_id）
+        customer_id: 客户ID（Shopify Customer ID）
         agent: 坐席信息（来自 JWT）
 
     Returns:
         客户画像数据
+
+    降级策略：
+        - Shopify API 失败时返回 mock 数据
+        - 不影响坐席工作台正常使用
     """
     try:
-        # MVP 阶段：返回模拟数据
-        # TODO: 后续集成 Shopify API 获取真实客户数据
+        shopify = get_shopify_client()
 
-        # 从 session_id 提取基本信息作为演示
-        mock_customer = {
-            "customer_id": customer_id,
-            "name": "John Doe",
-            "email": "john.doe@example.com",
-            "phone": "+49 123 456789",
-            "country": "DE",
-            "city": "Berlin",
-            "language_preference": "de",
-            "payment_currency": "EUR",
-            "source_channel": "shopify_organic",
-            "gdpr_consent": True,
-            "marketing_subscribed": False,
-            "vip_status": "gold",
-            "avatar_url": None,
-            "created_at": int(time.time()) - 86400 * 30  # 30 天前注册
+        # 【降级策略】如果 Shopify 未配置或未启用，返回 mock 数据
+        if not shopify:
+            print(f"⚠️  Shopify 未启用，使用 mock 数据: customer_id={customer_id}")
+            return await get_mock_customer_profile(customer_id, agent)
+
+        # 【核心逻辑】从 Shopify 获取真实客户数据
+        customer = shopify.get_customer(customer_id)
+
+        # 【降级策略】如果客户不存在，返回 mock 数据
+        if not customer:
+            print(f"⚠️  Shopify 客户不存在，使用 mock 数据: customer_id={customer_id}")
+            return await get_mock_customer_profile(customer_id, agent)
+
+        # 【数据转换】Shopify 格式 → 系统格式
+        from datetime import datetime
+
+        profile = {
+            "customer_id": str(customer["id"]),
+            "name": f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip(),
+            "email": customer.get("email"),
+            "phone": customer.get("phone"),
+            "country": customer.get("default_address", {}).get("country_code", ""),
+            "city": customer.get("default_address", {}).get("city", ""),
+            "language_preference": extract_language_from_tags(customer.get("tags", "")),
+            "payment_currency": customer.get("currency", "EUR"),
+            "source_channel": extract_source_from_tags(customer.get("tags", "")),
+            "gdpr_consent": customer.get("accepts_marketing", False),
+            "marketing_subscribed": customer.get("email_marketing_consent", {}).get("state") == "subscribed",
+            "vip_status": extract_vip_from_tags(customer.get("tags", "")),
+            "avatar_url": None,  # Shopify 不提供客户头像
+            "created_at": int(datetime.fromisoformat(
+                customer["created_at"].replace("Z", "+00:00")
+            ).timestamp()) if customer.get("created_at") else int(time.time())
         }
 
-        print(f"✅ 获取客户画像: customer_id={customer_id}, agent={agent.get('username')}")
+        print(f"✅ 获取客户画像（Shopify）: customer_id={customer_id}, email={profile['email']}, agent={agent.get('username')}")
 
         return {
             "success": True,
-            "data": mock_customer
+            "data": profile
         }
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"❌ 获取客户画像失败: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"获取客户画像失败: {str(e)}"
-        )
+        # 【降级策略】发生异常时返回 mock 数据，确保功能可用
+        print(f"⚠️  降级到 mock 数据")
+        return await get_mock_customer_profile(customer_id, agent)
+
+
+async def get_mock_customer_profile(customer_id: str, agent: dict):
+    """
+    Mock 客户画像数据（降级策略）
+
+    Args:
+        customer_id: 客户ID
+        agent: 坐席信息
+
+    Returns:
+        模拟的客户画像数据
+    """
+    mock_customer = {
+        "customer_id": customer_id,
+        "name": "John Doe",
+        "email": "john.doe@example.com",
+        "phone": "+49 123 456789",
+        "country": "DE",
+        "city": "Berlin",
+        "language_preference": "de",
+        "payment_currency": "EUR",
+        "source_channel": "shopify_organic",
+        "gdpr_consent": True,
+        "marketing_subscribed": False,
+        "vip_status": "gold",
+        "avatar_url": None,
+        "created_at": int(time.time()) - 86400 * 30  # 30 天前注册
+    }
+
+    print(f"✅ 获取客户画像（Mock）: customer_id={customer_id}, agent={agent.get('username')}")
+
+    return {
+        "success": True,
+        "data": mock_customer
+    }
 
 
 @app.get("/api/customers/{customer_id}/orders")
@@ -3015,22 +3093,140 @@ async def get_customer_orders(
     """
     获取客户订单历史
 
-    【MVP 阶段】返回模拟数据，后续集成 Shopify API
+    【v3.3.0】集成 Shopify API 获取真实订单数据
 
     Args:
-        customer_id: 客户ID（当前为 session_id）
+        customer_id: 客户ID（Shopify Customer ID）
         agent: 坐席信息（来自 JWT）
 
     Returns:
-        订单列表（最多返回最近3个订单）
+        订单列表（最多返回最近10个订单）
+
+    降级策略：
+        - Shopify API 失败时返回 mock 数据
+        - 不影响坐席工作台正常使用
     """
     try:
-        # MVP 阶段：返回模拟数据
-        # TODO: 后续集成 Shopify API 获取真实订单数据
+        shopify = get_shopify_client()
 
-        current_time = int(time.time())
+        # 【降级策略】如果 Shopify 未配置或未启用，返回 mock 数据
+        if not shopify:
+            print(f"⚠️  Shopify 未启用，使用 mock 数据: customer_id={customer_id}")
+            return await get_mock_customer_orders(customer_id, agent)
 
-        mock_orders = [
+        # 【核心逻辑】从 Shopify 获取真实订单数据
+        shopify_orders = shopify.get_customer_orders(customer_id, limit=10)
+
+        # 【降级策略】如果订单列表为空，返回 mock 数据
+        if not shopify_orders:
+            print(f"⚠️  Shopify 未返回订单，使用 mock 数据: customer_id={customer_id}")
+            return await get_mock_customer_orders(customer_id, agent)
+
+        # 【数据转换】Shopify 格式 → 系统格式
+        from datetime import datetime
+
+        orders = []
+
+        for shopify_order in shopify_orders:
+            # 解析订单基本信息
+            order_id = str(shopify_order.get("id"))
+            order_number = f"#{shopify_order.get('order_number', 'N/A')}"
+
+            # 映射订单状态
+            financial_status = shopify_order.get("financial_status", "")
+            fulfillment_status = shopify_order.get("fulfillment_status", "")
+
+            if fulfillment_status == "fulfilled":
+                status = "delivered"
+            elif fulfillment_status == "partial":
+                status = "in_transit"
+            elif financial_status == "paid":
+                status = "processing"
+            else:
+                status = "pending"
+
+            # 解析时间戳
+            created_at = int(datetime.fromisoformat(
+                shopify_order["created_at"].replace("Z", "+00:00")
+            ).timestamp()) if shopify_order.get("created_at") else int(time.time())
+
+            # 解析金额信息
+            total_amount = float(shopify_order.get("total_price", 0))
+            currency = shopify_order.get("currency", "EUR")
+
+            # 解析商品列表
+            items = []
+            for line_item in shopify_order.get("line_items", []):
+                item = {
+                    "product_id": str(line_item.get("product_id", "")),
+                    "sku": line_item.get("sku", ""),
+                    "product_name": line_item.get("name", "Unknown Product"),
+                    "quantity": line_item.get("quantity", 1),
+                    "price": float(line_item.get("price", 0))
+                }
+                items.append(item)
+
+            # 解析物流信息
+            shipping = {
+                "tracking_number": None,
+                "carrier": None,
+                "status": fulfillment_status or "pending"
+            }
+
+            fulfillments = shopify_order.get("fulfillments", [])
+            if fulfillments:
+                first_fulfillment = fulfillments[0]
+                shipping["tracking_number"] = first_fulfillment.get("tracking_number")
+                shipping["carrier"] = first_fulfillment.get("tracking_company")
+
+            # 构建订单对象
+            order = {
+                "order_id": order_id,
+                "order_number": order_number,
+                "status": status,
+                "created_at": created_at,
+                "total_amount": total_amount,
+                "currency": currency,
+                "payment_method": shopify_order.get("gateway", "Unknown"),
+                "items": items,
+                "shipping": shipping
+            }
+
+            orders.append(order)
+
+        print(f"✅ 获取客户订单（Shopify）: customer_id={customer_id}, count={len(orders)}, agent={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": {
+                "orders": orders,
+                "total": len(orders)
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取客户订单失败: {str(e)}")
+        # 【降级策略】发生异常时返回 mock 数据，确保功能可用
+        print(f"⚠️  降级到 mock 数据")
+        return await get_mock_customer_orders(customer_id, agent)
+
+
+async def get_mock_customer_orders(customer_id: str, agent: dict):
+    """
+    Mock 客户订单数据（降级策略）
+
+    Args:
+        customer_id: 客户ID
+        agent: 坐席信息
+
+    Returns:
+        模拟的订单列表
+    """
+    current_time = int(time.time())
+
+    mock_orders = [
             {
                 "order_id": "order_001",
                 "order_number": "#1001",
@@ -3137,24 +3333,15 @@ async def get_customer_orders(
             }
         ]
 
-        print(f"✅ 获取客户订单: customer_id={customer_id}, agent={agent.get('username')}, count={len(mock_orders)}")
+    print(f"✅ 获取客户订单（Mock）: customer_id={customer_id}, agent={agent.get('username')}, count={len(mock_orders)}")
 
-        return {
-            "success": True,
-            "data": {
-                "orders": mock_orders,
-                "total": len(mock_orders)
-            }
+    return {
+        "success": True,
+        "data": {
+            "orders": mock_orders,
+            "total": len(mock_orders)
         }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ 获取客户订单失败: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"获取客户订单失败: {str(e)}"
-        )
+    }
 
 
 @app.get("/api/customers/{customer_id}/devices")
@@ -3274,7 +3461,7 @@ async def get_conversation_history(
 
         # 获取会话创建时间和最后更新时间
         start_time = int(session_state.created_at)
-        end_time = int(session_state.updated_at) if session_state.status == SessionStatus.CLOSED else None
+        end_time = int(session_state.updated_at) if session_state.status == "closed" else None
 
         # 构造会话摘要
         summary = {
@@ -3285,7 +3472,7 @@ async def get_conversation_history(
             "user_message_count": user_count,
             "ai_message_count": ai_count,
             "agent_message_count": agent_count,
-            "status": session_state.status.value,
+            "status": session_state.status if isinstance(session_state.status, str) else session_state.status.value,
             "tags": []  # 可以后续扩展标签功能
         }
 
@@ -3327,6 +3514,427 @@ async def get_conversation_history(
         )
 
 
+# ==================== 工单系统 API (v3.4.0+) ====================
+
+from src.ticket_model import (
+    Ticket, CreateTicketRequest, UpdateTicketRequest,
+    AssignTicketRequest, UpdateStatusRequest, AddCommentRequest,
+    TicketStatus, TicketCategory, TicketPriority, Department,
+    Comment, Attachment, Activity
+)
+from src.ticket_store import get_ticket_store
+
+
+@app.post("/api/tickets")
+async def create_ticket(
+    request: CreateTicketRequest,
+    agent: dict = Depends(require_agent)
+):
+    """
+    创建工单
+
+    从会话创建工单，自动拉取AI摘要和客户信息
+
+    权限: 任何坐席都可以创建工单
+    """
+    try:
+        ticket_store = get_ticket_store()
+
+        # 生成工单ID
+        ticket_id = f"ticket_{uuid.uuid4().hex[:16]}"
+
+        # 如果关联了session,获取会话状态
+        ai_summary = None
+        customer_intent = None
+        ai_conclusion = None
+
+        if request.session_id:
+            session_state = await session_store.get(request.session_id)
+            if session_state:
+                # 尝试从会话历史生成简单摘要
+                history_summary = []
+                for msg in session_state.history[-5:]:  # 最近5条消息
+                    history_summary.append(f"{msg.role}: {msg.content[:50]}...")
+
+                ai_summary = "\n".join(history_summary) if history_summary else None
+
+                # 提取客户诉求(从escalation)
+                if session_state.escalation:
+                    customer_intent = session_state.escalation.details
+
+        # 创建工单
+        current_time = time.time()
+        ticket = Ticket(
+            ticket_id=ticket_id,
+            ticket_number="",  # 由store自动生成
+            title=request.title,
+            description=request.description,
+            session_id=request.session_id,
+            customer_id=request.customer_id,
+            order_id=request.order_id,
+            bike_model=request.bike_model,
+            vin=request.vin,
+            category=request.category,
+            priority=request.priority,
+            status=TicketStatus.PENDING,
+            assignee_id=None,
+            assignee_name=None,
+            department=request.department,
+            created_by=agent.get("agent_id"),
+            created_by_name=agent.get("name", agent.get("username")),
+            created_at=current_time,
+            updated_at=current_time,
+            ai_summary=ai_summary,
+            customer_intent=customer_intent,
+            ai_conclusion=ai_conclusion,
+            attachments=[],
+            comments=[],
+            activity_log=[]
+        )
+
+        # 保存工单
+        ticket = await ticket_store.create(ticket)
+
+        print(f"✅ 创建工单: {ticket.ticket_number}, agent={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 创建工单失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"创建工单失败: {str(e)}"
+        )
+
+
+@app.get("/api/tickets/{ticket_id}")
+async def get_ticket(
+    ticket_id: str,
+    agent: dict = Depends(require_agent)
+):
+    """
+    获取工单详情
+
+    权限: 任何坐席都可以查看工单
+    """
+    try:
+        ticket_store = get_ticket_store()
+        ticket = await ticket_store.get(ticket_id)
+
+        if not ticket:
+            raise HTTPException(
+                status_code=404,
+                detail=f"工单不存在: {ticket_id}"
+            )
+
+        print(f"✅ 获取工单: {ticket.ticket_number}, agent={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取工单失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取工单失败: {str(e)}"
+        )
+
+
+@app.get("/api/tickets")
+async def list_tickets(
+    status: Optional[TicketStatus] = None,
+    department: Optional[Department] = None,
+    assignee_id: Optional[str] = None,
+    category: Optional[TicketCategory] = None,
+    priority: Optional[TicketPriority] = None,
+    page: int = 1,
+    page_size: int = 20,
+    agent: dict = Depends(require_agent)
+):
+    """
+    查询工单列表
+
+    支持多条件过滤和分页
+
+    权限: 任何坐席都可以查询工单列表
+    """
+    try:
+        ticket_store = get_ticket_store()
+
+        result = await ticket_store.list(
+            status=status,
+            department=department,
+            assignee_id=assignee_id,
+            category=category,
+            priority=priority,
+            page=page,
+            page_size=page_size
+        )
+
+        # 转换为可序列化格式
+        items = [ticket.model_dump() for ticket in result["items"]]
+
+        print(f"✅ 查询工单列表: agent={agent.get('username')}, total={result['total']}")
+
+        return {
+            "success": True,
+            "data": {
+                "items": items,
+                "total": result["total"],
+                "page": result["page"],
+                "page_size": result["page_size"],
+                "total_pages": result["total_pages"]
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 查询工单列表失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"查询工单列表失败: {str(e)}"
+        )
+
+
+@app.patch("/api/tickets/{ticket_id}")
+async def update_ticket(
+    ticket_id: str,
+    request: UpdateTicketRequest,
+    agent: dict = Depends(require_agent)
+):
+    """
+    更新工单
+
+    权限: 任何坐席都可以更新工单
+    """
+    try:
+        ticket_store = get_ticket_store()
+        ticket = await ticket_store.get(ticket_id)
+
+        if not ticket:
+            raise HTTPException(
+                status_code=404,
+                detail=f"工单不存在: {ticket_id}"
+            )
+
+        # 更新字段
+        if request.title is not None:
+            ticket.title = request.title
+        if request.description is not None:
+            ticket.description = request.description
+        if request.category is not None:
+            ticket.category = request.category
+        if request.priority is not None:
+            ticket.priority = request.priority
+        if request.tags is not None:
+            ticket.tags = request.tags
+
+        # 保存更新
+        ticket = await ticket_store.update(ticket)
+
+        print(f"✅ 更新工单: {ticket.ticket_number}, agent={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 更新工单失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"更新工单失败: {str(e)}"
+        )
+
+
+@app.post("/api/tickets/{ticket_id}/assign")
+async def assign_ticket(
+    ticket_id: str,
+    request: AssignTicketRequest,
+    agent: dict = Depends(require_agent)
+):
+    """
+    指派工单
+
+    权限: 任何坐席都可以指派工单
+    """
+    try:
+        ticket_store = get_ticket_store()
+
+        ticket = await ticket_store.assign(
+            ticket_id=ticket_id,
+            assignee_id=request.assignee_id,
+            assignee_name=request.assignee_name,
+            department=request.department,
+            operator_id=agent.get("agent_id"),
+            operator_name=agent.get("name", agent.get("username"))
+        )
+
+        print(f"✅ 指派工单: {ticket.ticket_number} → {request.assignee_name}, operator={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 指派工单失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"指派工单失败: {str(e)}"
+        )
+
+
+@app.post("/api/tickets/{ticket_id}/status")
+async def update_ticket_status(
+    ticket_id: str,
+    request: UpdateStatusRequest,
+    agent: dict = Depends(require_agent)
+):
+    """
+    更新工单状态
+
+    权限: 任何坐席都可以更新工单状态
+    """
+    try:
+        ticket_store = get_ticket_store()
+
+        ticket = await ticket_store.update_status(
+            ticket_id=ticket_id,
+            new_status=request.status,
+            operator_id=agent.get("agent_id"),
+            operator_name=agent.get("name", agent.get("username")),
+            comment=request.comment
+        )
+
+        print(f"✅ 更新工单状态: {ticket.ticket_number} → {request.status}, operator={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 更新工单状态失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"更新工单状态失败: {str(e)}"
+        )
+
+
+@app.post("/api/tickets/{ticket_id}/comments")
+async def add_comment(
+    ticket_id: str,
+    request: AddCommentRequest,
+    agent: dict = Depends(require_agent)
+):
+    """
+    添加工单评论
+
+    权限: 任何坐席都可以添加评论
+    """
+    try:
+        ticket_store = get_ticket_store()
+
+        # 创建评论
+        comment = Comment(
+            id=f"comment_{uuid.uuid4().hex[:16]}",
+            content=request.content,
+            author_id=agent.get("agent_id"),
+            author_name=agent.get("name", agent.get("username")),
+            mentions=request.mentions,
+            created_at=time.time(),
+            is_internal=request.is_internal
+        )
+
+        ticket = await ticket_store.add_comment(
+            ticket_id=ticket_id,
+            comment=comment,
+            operator_id=agent.get("agent_id"),
+            operator_name=agent.get("name", agent.get("username"))
+        )
+
+        print(f"✅ 添加工单评论: {ticket.ticket_number}, operator={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 添加工单评论失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"添加工单评论失败: {str(e)}"
+        )
+
+
+@app.get("/api/sessions/{session_name}/ticket")
+async def get_ticket_by_session(
+    session_name: str,
+    agent: dict = Depends(require_agent)
+):
+    """
+    根据会话ID获取工单
+
+    权限: 任何坐席都可以查询
+    """
+    try:
+        ticket_store = get_ticket_store()
+        ticket = await ticket_store.get_by_session(session_name)
+
+        if not ticket:
+            return {
+                "success": True,
+                "data": None
+            }
+
+        print(f"✅ 根据会话获取工单: session={session_name}, ticket={ticket.ticket_number}, agent={agent.get('username')}")
+
+        return {
+            "success": True,
+            "data": ticket.model_dump()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取工单失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"获取工单失败: {str(e)}"
+        )
+
+
+# ==================== End of 工单系统 API ====================
+
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -3343,6 +3951,7 @@ if __name__ == "__main__":
     🔐 鉴权模式: {os.getenv("COZE_AUTH_MODE", "OAUTH_JWT")}
     💬 多轮对话: 已启用
     🔧 人工接管: 已启用
+    🎫 工单系统: 已启用 (v3.4.0+)
     ==========================================
     """)
 

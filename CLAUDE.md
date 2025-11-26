@@ -627,6 +627,150 @@ async def get_agents(agent: Dict = Depends(require_agent)):  # 应该用 require
 8. **不要允许** 坐席修改自己的 role、username、max_sessions 等敏感字段 ⭐ v3.1.3
 9. **不要跳过** 旧密码验证直接修改密码 ⭐ v3.1.2
 10. **不要混用** JWT 权限级别（如用 require_agent 保护管理员 API）⭐ v3.1
+11. **不要假设或生成** 需要用户手动获取的外部信息（API密钥、URL等） ⭐ v3.3
+
+---
+
+## 📞 外部信息获取原则 ⭐ **新增 v3.3**
+
+### 何时必须询问用户
+
+在开发过程中，遇到以下情况**必须先询问用户，不得假设或自行生成**：
+
+#### 1. 外部服务凭证
+- ✅ **必须询问**：
+  - API 密钥（Shopify Access Token、DHL API Key等）
+  - OAuth Client ID/Secret
+  - 数据库密码
+  - SMTP 邮箱密码
+  - 第三方服务认证信息
+
+- ❌ **禁止假设**：
+  ```python
+  # ❌ 错误 - 不要使用占位符假装已有密钥
+  SHOPIFY_ACCESS_TOKEN = "shpat_xxxxxxxxxxxxxxxx"
+
+  # ✅ 正确 - 询问用户实际的 token
+  # 在实施方案中明确标注："需要用户提供 Shopify Access Token"
+  ```
+
+#### 2. 外部系统参数
+- ✅ **必须询问**：
+  - 店铺名称（`fiido-store.myshopify.com`）
+  - 数据库连接地址
+  - Redis 服务器地址
+  - API 版本号（如果需要特定版本）
+  - 域名和端口配置
+
+- ❌ **禁止假设**：
+  ```python
+  # ❌ 错误 - 不要假设店铺名称
+  SHOP_NAME = "fiido-store"
+
+  # ✅ 正确 - 在开发前询问
+  # "请提供您的 Shopify 店铺名称（不含 .myshopify.com）"
+  ```
+
+#### 3. 业务配置参数
+- ✅ **必须询问**（如果文档中未明确定义）：
+  - VIP 等级标签格式（`vip_gold` 还是 `VIP-GOLD`？）
+  - 语言标签格式（`lang_de` 还是 `language:de`？）
+  - 订单状态映射规则
+  - 币种优先级
+
+- ✅ **可以假设**（如果是行业通用标准）：
+  - ISO 货币代码（EUR、GBP）
+  - ISO 国家代码（DE、FR）
+  - HTTP 状态码
+
+#### 4. 环境相关配置
+- ✅ **必须询问**：
+  - 生产环境域名
+  - SSL 证书路径
+  - 部署服务器信息
+
+- ✅ **可以假设**（开发环境）：
+  - localhost:8000
+  - 开发模式配置
+
+### 正确的询问方式
+
+**场景示例**：实施 Shopify 集成
+
+```markdown
+## 实施前需要的信息
+
+在开始开发前，请提供以下信息：
+
+### 1. Shopify 店铺配置 ⭐ **必需**
+- **店铺名称**: 您的 Shopify 店铺名称（不含 .myshopify.com）
+  - 示例：`fiido-store`
+  - 获取方式：登录 Shopify Admin，查看 URL
+
+- **Admin API Access Token**: ⭐ **敏感信息**
+  - 获取方式：
+    1. Shopify Admin > 设置 > 应用和销售渠道 > 开发应用
+    2. 创建应用 "Fiido客服系统"
+    3. 配置权限：read_customers, read_orders, read_products
+    4. 安装应用，复制 Access Token
+  - 格式：`shpat_xxxxxxxxxxxxxxxxxxxx`（以 shpat_ 开头）
+
+### 2. 业务规则配置 ⭐ **必需**
+- **VIP 标签格式**: Shopify 中如何标记 VIP 客户？
+  - 选项 A: `vip_gold`, `vip_silver`, `vip_bronze`
+  - 选项 B: `VIP-GOLD`, `VIP-SILVER`, `VIP-BRONZE`
+  - 选项 C: 其他（请说明）
+
+- **语言标签格式**: 如何标记客户语言偏好？
+  - 选项 A: `lang_de`, `lang_fr`, `lang_en`
+  - 选项 B: `language:de`, `language:fr`
+  - 选项 C: 其他（请说明）
+
+### 3. 可选配置
+- **API 版本**: 使用哪个 Shopify API 版本？
+  - 默认：2024-10（最新稳定版）
+  - 如需指定其他版本，请告知
+
+---
+
+**提供这些信息后，我将开始实施。**
+```
+
+### 开发流程调整
+
+**原流程**：
+1. 阅读文档
+2. 编写方案
+3. **直接开始开发** ❌
+
+**新流程**：
+1. 阅读文档
+2. 编写方案
+3. **识别需要的外部信息**
+4. **询问用户获取信息** ⭐ **新增步骤**
+5. 确认信息后开始开发 ✅
+
+### 例外情况
+
+以下情况**无需询问**，可直接使用合理默认值：
+
+1. **开发/测试环境配置**
+   - localhost、127.0.0.1
+   - 默认端口（8000、5173）
+   - 测试账号密码（admin/admin123）
+
+2. **Mock 数据**
+   - 开发阶段的占位数据
+   - 示例订单、客户信息
+
+3. **行业标准**
+   - HTTP 状态码
+   - ISO 标准代码
+   - 通用数据格式
+
+4. **文档已明确定义**
+   - PRD 中已说明的配置
+   - 现有代码中已有的配置
 
 ---
 
