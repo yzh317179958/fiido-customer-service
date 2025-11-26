@@ -27,6 +27,23 @@ const router = createRouter({
         requiresAdmin: true  // 需要管理员权限
       }
     },
+    // ⭐ v3.4.0 新增：工单管理页面
+    {
+      path: '/tickets',
+      name: 'TicketManagement',
+      component: () => import('@/views/TicketManagement.vue'),
+      meta: {
+        requiresAuth: true
+      }
+    },
+    {
+      path: '/tickets/:id',
+      name: 'TicketDetail',
+      component: () => import('@/views/TicketDetail.vue'),
+      meta: {
+        requiresAuth: true
+      }
+    },
     {
       path: '/',
       redirect: '/dashboard'

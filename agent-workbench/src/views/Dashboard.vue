@@ -463,6 +463,9 @@ onUnmounted(() => {
               <el-dropdown-item @click="router.push('/admin/agents')">
                 <span>👥 坐席管理</span>
               </el-dropdown-item>
+              <el-dropdown-item @click="router.push('/tickets')">
+                <span>🎫 工单管理</span>
+              </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
