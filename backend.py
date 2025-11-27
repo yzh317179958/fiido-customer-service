@@ -2845,14 +2845,16 @@ async def get_available_agents(
         # 获取所有坐席
         all_agents = agent_manager.get_all_agents()
 
-        # 过滤：排除当前登录坐席，只返回基本信息
+        # 过滤：排除当前登录坐席，只返回在线状态的坐席
         current_agent_id = agent.get("agent_id")
         available = []
 
+        from src.agent_auth import AgentStatus
         for a in all_agents:
-            if a.agent_id != current_agent_id:
+            # 只返回在线且非当前登录坐席
+            if a.id != current_agent_id and a.status == AgentStatus.ONLINE:
                 available.append({
-                    "id": a.agent_id,
+                    "id": a.id,
                     "username": a.username,
                     "name": a.name,
                     "status": a.status.value,

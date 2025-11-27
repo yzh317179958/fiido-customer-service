@@ -459,9 +459,10 @@ const handleKeyPress = (event: KeyboardEvent) => {
 const fetchAvailableAgents = async () => {
   try {
     loadingAgents.value = true
+    const token = localStorage.getItem('access_token')
     const response = await fetch(`${API_BASE}/api/agents/available`, {
       headers: {
-        'Authorization': `Bearer ${agentStore.token}`
+        'Authorization': `Bearer ${token}`
       }
     })
 

@@ -404,6 +404,32 @@ else
 fi
 
 echo ""
+echo "=== 【模块5】会话转接功能测试 v3.8.1 ==="
+echo ""
+
+# 测试27: 会话转接API功能
+echo -n "测试27: 会话转接API... "
+TEST_RESULT=$(/home/yzh/AI客服/鉴权/tests/test_transfer_agents.sh 2>&1 | grep -c "失败: 0")
+if [ "$TEST_RESULT" -gt 0 ]; then
+    echo -e "${GREEN}✅ 通过${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ 失败${NC}"
+    ((FAIL++))
+fi
+
+# 测试28: 在线坐席过滤
+echo -n "测试28: 在线坐席过滤... "
+TEST_RESULT=$(/home/yzh/AI客服/鉴权/tests/test_online_filter.sh 2>&1 | grep -c "失败: 0")
+if [ "$TEST_RESULT" -gt 0 ]; then
+    echo -e "${GREEN}✅ 通过${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ 失败${NC}"
+    ((FAIL++))
+fi
+
+echo ""
 echo "=== TypeScript类型检查 ==="
 echo ""
 

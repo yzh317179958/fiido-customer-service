@@ -448,9 +448,57 @@ async def chat(request: ChatRequest):
    # 预期: 所有测试通过
    ```
 
-5. **集成到回归测试 ⭐ 关键步骤**
+5. **UI 测试 ⭐ 关键步骤**
 
-   **强制要求**：测试通过后，必须将新功能测试集成到 `tests/regression_test.sh`
+   **强制要求**：对于涉及前端UI的功能，在集成到回归测试之前，必须先进行UI手动测试
+
+   **流程**：
+   - ✅ 后端API测试通过后，**暂停**自动化流程
+   - ✅ 提交代码到Git，标记为"待UI验证"
+   - ✅ 通知用户进行UI手动测试
+   - ✅ 等待用户确认UI功能正常
+   - ✅ 用户确认后，才能集成到回归测试
+
+   **示例**：
+   ```bash
+   # 1. API测试通过
+   ./tests/test_transfer_agents.sh  # ✅ 8/8 通过
+
+   # 2. 提交代码（不集成回归测试）
+   git add backend.py agent-workbench/src/views/Dashboard.vue tests/test_transfer_agents.sh
+   git commit -m "feat: 会话转接获取真实坐席列表 (待UI验证)"
+   git push origin main
+
+   # 3. 通知用户：
+   # "已完成会话转接坐席列表功能，API测试全部通过。
+   #  请测试转接对话框是否正常显示真实坐席列表，
+   #  确认无误后告知，我将集成到回归测试套件。"
+
+   # 4. 等待用户确认...
+   # 用户: "UI测试通过，可以集成了"
+
+   # 5. 集成到回归测试
+   # (添加测试到 regression_test.sh)
+   git add tests/regression_test.sh
+   git commit -m "test: 集成会话转接测试到回归套件"
+   git push origin main
+   ```
+
+   **适用场景**：
+   - 前端界面改动（如新增组件、修改布局）
+   - 用户交互流程变更（如对话框、表单）
+   - 视觉效果优化（如加载状态、错误提示）
+
+   **不适用场景**（直接集成回归测试）：
+   - 纯后端API功能（无前端变化）
+   - Bug修复（已有功能的修正）
+   - 性能优化（无UI变化）
+
+6. **集成到回归测试 ⭐ 关键步骤**
+
+   **强制要求**：
+   - 纯后端功能：API测试通过后，直接集成到 `tests/regression_test.sh`
+   - 前端功能：**必须经过用户UI测试确认后**，才能集成到回归测试
 
    ```bash
    # 编辑 tests/regression_test.sh
