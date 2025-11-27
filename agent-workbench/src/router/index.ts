@@ -47,6 +47,12 @@ const router = createRouter({
 router.beforeEach((to, _from, next) => {
   const agentStore = useAgentStore()
 
+  // 🔴 关键修复: 确保在检查权限前恢复会话
+  // 因为router guard可能在App.vue的onMounted之前执行
+  if (!agentStore.isLoggedIn) {
+    agentStore.restoreSession()
+  }
+
   // 🔴 v3.1.3: 检查是否需要管理员权限
   if (to.meta.requiresAdmin) {
     if (!agentStore.isLoggedIn) {

@@ -492,6 +492,12 @@ const shortcuts: KeyboardShortcuts = {
     category: 'function',
     allowInInput: false
   },
+  'Ctrl+/': {
+    handler: toggleShortcutsHelp,
+    description: '快捷命令面板',
+    category: 'function',
+    allowInInput: false
+  },
   '?': {
     handler: toggleShortcutsHelp,
     description: '快捷键帮助',

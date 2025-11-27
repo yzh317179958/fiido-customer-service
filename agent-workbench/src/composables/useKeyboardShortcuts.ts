@@ -56,7 +56,13 @@ function formatKeyCombo(event: KeyboardEvent): string {
   // 标准化按键名称
   let key = event.key
   if (key === ' ') key = 'Space'
-  if (key.length === 1) key = key.toLowerCase()
+
+  // 特殊处理 ? 键
+  if (key === '?') {
+    // 保持原样
+  } else if (key.length === 1) {
+    key = key.toLowerCase()
+  }
 
   // 特殊按键保持大小写
   if (['Enter', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) {
@@ -159,6 +165,7 @@ export function useKeyboardShortcuts(shortcuts: KeyboardShortcuts) {
  * 安全方案：
  * - Ctrl+Shift+字母: 安全，不与浏览器冲突
  * - Ctrl+方向键: 安全，不与浏览器冲突
+ * - Ctrl+/: 安全，可用作快捷命令
  */
 export const DEFAULT_SHORTCUTS_P0 = {
   // 导航类
@@ -198,6 +205,11 @@ export const DEFAULT_SHORTCUTS_P0 = {
   // 功能类
   'Ctrl+Shift+b': {
     description: '内部备注',
+    category: 'function' as const,
+    allowInInput: false
+  },
+  'Ctrl+/': {
+    description: '快捷命令面板',
     category: 'function' as const,
     allowInInput: false
   },
