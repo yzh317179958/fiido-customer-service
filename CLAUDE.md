@@ -669,6 +669,52 @@ cd agent-workbench && npm run dev
 | 用户端     | http://localhost:5173      | http://192.168.x.x:5173      | Vue前端      |
 | 坐席工作台 | http://localhost:5174      | http://192.168.x.x:5174      | 坐席管理系统 |
 
+### ⭐ 前端 API 地址配置规范（强制遵守）
+
+**所有前端项目中的 API 调用必须使用环境变量配置，禁止硬编码地址！**
+
+#### 正确做法 ✅
+
+```javascript
+// 在组件顶部声明 API_BASE（紧随 import 之后）
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+
+// 使用 API_BASE 调用接口
+const response = await fetch(`${API_BASE}/api/quick-replies`, {
+  headers: {
+    'Authorization': `Bearer ${token}`
+  }
+})
+```
+
+#### 错误做法 ❌
+
+```javascript
+// ❌ 错误 - 硬编码地址
+const response = await fetch('http://localhost:8000/api/quick-replies', ...)
+
+// ❌ 错误 - 直接使用 localhost
+const response = await fetch(`http://localhost:8000/api/${endpoint}`, ...)
+```
+
+#### 环境变量配置
+
+在前端项目的 `.env` 文件中配置：
+
+```bash
+# agent-workbench/.env
+VITE_API_BASE=http://localhost:8000
+
+# frontend/.env
+VITE_API_BASE=http://localhost:8000
+```
+
+**注意**：
+- 使用 Vite 的环境变量必须以 `VITE_` 开头
+- 所有 API 调用必须使用 `${API_BASE}` 拼接路径
+- 禁止在任何地方硬编码 `http://localhost:8000`
+- 参考 `Dashboard.vue` 的实现模式
+
 ### 测试命令
 
 ```bash

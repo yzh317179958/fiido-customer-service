@@ -216,6 +216,9 @@ import { useAuthStore } from '../stores/auth'
 
 const authStore = useAuthStore()
 
+// API 基础地址配置（遵循 claude.md 规范）
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+
 // 状态
 const quickReplies = ref([])
 const categories = ref({})
@@ -276,7 +279,7 @@ const getCategoryName = (key) => {
 // 加载分类
 const loadCategories = async () => {
   try {
-    const response = await fetch('http://localhost:8000/api/quick-replies/categories', {
+    const response = await fetch(`${API_BASE}/api/quick-replies/categories`, {
       headers: {
         'Authorization': `Bearer ${authStore.token}`
       }
@@ -310,7 +313,7 @@ const loadQuickReplies = async () => {
       params.append('include_shared', 'false')
     }
 
-    const response = await fetch(`http://localhost:8000/api/quick-replies?${params}`, {
+    const response = await fetch(`${API_BASE}/api/quick-replies?${params}`, {
       headers: {
         'Authorization': `Bearer ${authStore.token}`
       }
@@ -360,8 +363,8 @@ const editReply = (reply) => {
 const saveReply = async () => {
   try {
     const url = editingReply.value
-      ? `http://localhost:8000/api/quick-replies/${editingReply.value.id}`
-      : 'http://localhost:8000/api/quick-replies'
+      ? `${API_BASE}/api/quick-replies/${editingReply.value.id}`
+      : `${API_BASE}/api/quick-replies`
 
     const method = editingReply.value ? 'PUT' : 'POST'
 
@@ -405,7 +408,7 @@ const deleteReply = async (reply) => {
   }
 
   try {
-    const response = await fetch(`http://localhost:8000/api/quick-replies/${reply.id}`, {
+    const response = await fetch(`${API_BASE}/api/quick-replies/${reply.id}`, {
       method: 'DELETE',
       headers: {
         'Authorization': `Bearer ${authStore.token}`
