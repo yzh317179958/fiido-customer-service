@@ -6,8 +6,10 @@ import { useRouter } from 'vue-router'
 import SessionList from '@/components/SessionList.vue'
 import QuickReplies from '@/components/QuickReplies.vue'
 import CustomerProfile from '@/components/customer/CustomerProfile.vue'
+import KeyboardShortcutsHelp from '@/components/KeyboardShortcutsHelp.vue'
 import type { SessionStatus, CustomerProfile as CustomerProfileType } from '@/types'
 import { useAgentWorkbenchSSE } from '@/composables/useAgentWorkbenchSSE'
+import { useKeyboardShortcuts, type KeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 import axios from 'axios'
 
 const agentStore = useAgentStore()
@@ -26,6 +28,12 @@ const newNoteContent = ref('')
 const addingNote = ref(false)
 const editingNoteId = ref<string | null>(null)
 const editingNoteContent = ref('')
+
+// 【模块6】快捷键帮助面板
+const showShortcutsHelp = ref(false)
+
+// 【模块6】搜索框引用
+const searchInputRef = ref<HTMLInputElement | null>(null)
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
@@ -349,7 +357,7 @@ const handleDeleteNote = async (noteId: string) => {
   }
 }
 
-// 【模块5】格式化时间
+// 【模块6】格式化时间
 const formatNoteTime = (timestamp: number) => {
   const date = new Date(timestamp * 1000)
   const now = new Date()
@@ -371,6 +379,130 @@ const formatNoteTime = (timestamp: number) => {
   // 其他
   return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
+
+// 【模块6】快捷键处理函数
+const focusSearchInput = () => {
+  if (searchInputRef.value) {
+    searchInputRef.value.focus()
+  }
+}
+
+const selectPreviousSession = () => {
+  const sessions = filteredSessions.value
+  if (sessions.length === 0) return
+
+  const currentIndex = sessions.findIndex(s => s.session_name === sessionStore.currentSessionName)
+  const previousIndex = currentIndex > 0 ? currentIndex - 1 : sessions.length - 1
+  handleSelectSession(sessions[previousIndex].session_name)
+}
+
+const selectNextSession = () => {
+  const sessions = filteredSessions.value
+  if (sessions.length === 0) return
+
+  const currentIndex = sessions.findIndex(s => s.session_name === sessionStore.currentSessionName)
+  const nextIndex = currentIndex < sessions.length - 1 ? currentIndex + 1 : 0
+  handleSelectSession(sessions[nextIndex].session_name)
+}
+
+const closeCurrentPanel = () => {
+  // 关闭快捷键帮助面板
+  if (showShortcutsHelp.value) {
+    showShortcutsHelp.value = false
+    return
+  }
+
+  // 关闭转接对话框
+  if (showTransferDialog.value) {
+    showTransferDialog.value = false
+    return
+  }
+
+  // 关闭快捷回复面板
+  if (showQuickReplies.value) {
+    showQuickReplies.value = false
+    return
+  }
+}
+
+const toggleShortcutsHelp = () => {
+  showShortcutsHelp.value = !showShortcutsHelp.value
+}
+
+const focusNotesTab = () => {
+  if (sessionStore.currentSession) {
+    currentTab.value = 'notes'
+  }
+}
+
+// 【模块6】注册快捷键
+const shortcuts: KeyboardShortcuts = {
+  'Ctrl+f': {
+    handler: focusSearchInput,
+    description: '搜索会话',
+    category: 'navigation',
+    allowInInput: false
+  },
+  'Alt+ArrowUp': {
+    handler: selectPreviousSession,
+    description: '上一个会话',
+    category: 'navigation',
+    allowInInput: false
+  },
+  'Alt+ArrowDown': {
+    handler: selectNextSession,
+    description: '下一个会话',
+    category: 'navigation',
+    allowInInput: false
+  },
+  'Escape': {
+    handler: closeCurrentPanel,
+    description: '关闭面板',
+    category: 'navigation',
+    allowInInput: true
+  },
+  'Ctrl+t': {
+    handler: () => {
+      if (sessionStore.currentSession?.status === 'manual_live') {
+        openTransferDialog()
+      }
+    },
+    description: '转接会话',
+    category: 'action',
+    allowInInput: false
+  },
+  'Ctrl+r': {
+    handler: () => {
+      if (sessionStore.currentSession?.status === 'manual_live') {
+        handleRelease()
+      }
+    },
+    description: '释放会话',
+    category: 'action',
+    allowInInput: false
+  },
+  'Ctrl+b': {
+    handler: focusNotesTab,
+    description: '内部备注',
+    category: 'function',
+    allowInInput: false
+  },
+  'Ctrl+/': {
+    handler: toggleShortcutsHelp,
+    description: '快捷命令面板',
+    category: 'function',
+    allowInInput: false
+  },
+  '?': {
+    handler: toggleShortcutsHelp,
+    description: '快捷键帮助',
+    category: 'function',
+    allowInInput: false
+  }
+}
+
+// 初始化快捷键系统
+useKeyboardShortcuts(shortcuts)
 
 // 处理接入会话
 const handleTakeover = async (sessionName: string) => {
@@ -732,6 +864,7 @@ onUnmounted(() => {
         <!-- 搜索框 -->
         <div class="search-box">
           <input
+            ref="searchInputRef"
             v-model="searchKeyword"
             type="text"
             class="search-input"
@@ -1035,6 +1168,9 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 【模块6】快捷键帮助面板 -->
+    <KeyboardShortcutsHelp v-if="showShortcutsHelp" @close="showShortcutsHelp = false" />
   </div>
 </template>
 

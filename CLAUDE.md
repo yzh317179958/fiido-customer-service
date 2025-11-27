@@ -448,30 +448,77 @@ async def chat(request: ChatRequest):
    # 预期: 所有测试通过
    ```
 
-5. **UI 测试 ⭐ 关键步骤**
+5. **自测环节 ⭐ 强制执行**
 
-   **强制要求**：对于涉及前端UI的功能，在集成到回归测试之前，必须先进行UI手动测试
+   **强制要求**：在通知用户进行 UI 测试之前，开发者（Claude）必须先进行自测
+
+   **自测流程**：
+   - ✅ 检查代码是否编译通过（TypeScript 类型检查）
+   - ✅ 检查前端服务是否能正常启动（npm run dev）
+   - ✅ 检查浏览器控制台是否有错误
+   - ✅ 测试核心功能是否可用（如快捷键是否响应）
+   - ✅ 确认没有明显的 UI 渲染问题
+
+   **自测命令示例**：
+   ```bash
+   # 1. TypeScript 类型检查
+   cd agent-workbench
+   npx vue-tsc --noEmit
+   # 预期: 无类型错误
+
+   # 2. 启动前端服务
+   npm run dev
+   # 预期: 服务正常启动在 http://localhost:5174
+
+   # 3. 浏览器自测（手动）
+   # - 打开 http://localhost:5174
+   # - 登录系统
+   # - 测试新功能基本可用
+   # - 检查浏览器控制台无错误
+   ```
+
+   **自测通过标准**：
+   - ✅ 无编译错误
+   - ✅ 无类型错误
+   - ✅ 前端服务正常运行
+   - ✅ 核心功能可用
+   - ✅ 无控制台错误
+
+   **自测失败处理**：
+   - ❌ 如发现错误，立即修复，重新自测
+   - ❌ 不得将有明显错误的代码提交给用户测试
+
+6. **UI 手动测试 ⭐ 关键步骤**
+
+   **强制要求**：对于涉及前端UI的功能，在集成到回归测试之前，必须先经过自测，然后通知用户进行 UI 手动测试
 
    **流程**：
-   - ✅ 后端API测试通过后，**暂停**自动化流程
-   - ✅ 提交代码到Git，标记为"待UI验证"
+   - ✅ 自测通过后，提交代码到Git，标记为"待UI验证"
    - ✅ 通知用户进行UI手动测试
    - ✅ 等待用户确认UI功能正常
    - ✅ 用户确认后，才能集成到回归测试
 
    **示例**：
    ```bash
-   # 1. API测试通过
-   ./tests/test_transfer_agents.sh  # ✅ 8/8 通过
+   # 1. 自测通过
+   npx vue-tsc --noEmit  # ✅ 无类型错误
+   npm run dev           # ✅ 服务正常启动
+   # 浏览器测试：快捷键响应正常，无控制台错误
 
    # 2. 提交代码（不集成回归测试）
-   git add backend.py agent-workbench/src/views/Dashboard.vue tests/test_transfer_agents.sh
-   git commit -m "feat: 会话转接获取真实坐席列表 (待UI验证)"
+   git add agent-workbench/src/composables/useKeyboardShortcuts.ts
+   git add agent-workbench/src/components/KeyboardShortcutsHelp.vue
+   git add agent-workbench/src/views/Dashboard.vue
+   git commit -m "feat: 快捷键系统 (待UI验证)"
    git push origin main
 
    # 3. 通知用户：
-   # "已完成会话转接坐席列表功能，API测试全部通过。
-   #  请测试转接对话框是否正常显示真实坐席列表，
+   # "已完成快捷键系统功能，自测已通过（类型检查、服务启动、基本功能验证）。
+   #  请测试以下快捷键：
+   #  - Ctrl+F: 搜索框聚焦
+   #  - Alt+↑/↓: 切换会话
+   #  - Ctrl+T: 转接对话框
+   #  - ?: 显示快捷键帮助
    #  确认无误后告知，我将集成到回归测试套件。"
 
    # 4. 等待用户确认...
@@ -479,9 +526,6 @@ async def chat(request: ChatRequest):
 
    # 5. 集成到回归测试
    # (添加测试到 regression_test.sh)
-   git add tests/regression_test.sh
-   git commit -m "test: 集成会话转接测试到回归套件"
-   git push origin main
    ```
 
    **适用场景**：
@@ -494,11 +538,11 @@ async def chat(request: ChatRequest):
    - Bug修复（已有功能的修正）
    - 性能优化（无UI变化）
 
-6. **集成到回归测试 ⭐ 关键步骤**
+7. **集成到回归测试 ⭐ 关键步骤**
 
    **强制要求**：
    - 纯后端功能：API测试通过后，直接集成到 `tests/regression_test.sh`
-   - 前端功能：**必须经过用户UI测试确认后**，才能集成到回归测试
+   - 前端功能：**必须经过自测和用户UI测试确认后**，才能集成到回归测试
 
    ```bash
    # 编辑 tests/regression_test.sh
@@ -517,7 +561,7 @@ async def chat(request: ChatRequest):
    ((total++))
    ```
 
-6. **更新测试计数**
+8. **更新测试计数**
    ```bash
    # 更新回归测试脚本中的预期测试总数
    # 例如：从 12/12 更新为 13/13
