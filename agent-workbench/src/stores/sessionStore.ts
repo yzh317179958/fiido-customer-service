@@ -45,7 +45,7 @@ export const useSessionStore = defineStore('session', () => {
   const pendingCount = computed(() => stats.value.by_status.pending_manual || 0)
   const manualLiveCount = computed(() => stats.value.by_status.manual_live || 0)
 
-  // 获取会话列表
+  // 获取会话列表 (增强版 - 支持高级筛选)
   async function fetchSessions(status?: SessionStatus, limit: number = 50, offset: number = 0) {
     isLoading.value = true
     error.value = null
@@ -74,6 +74,87 @@ export const useSessionStore = defineStore('session', () => {
     } catch (err: any) {
       error.value = err.message
       console.error('❌ 获取会话列表失败:', err)
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  // 【L1-1-Part1-模块1】高级筛选与搜索
+  async function fetchSessionsAdvanced(filters: {
+    status?: SessionStatus | 'all',
+    timeStart?: number,
+    timeEnd?: number,
+    agent?: 'all' | 'mine' | 'unassigned' | string,
+    customerType?: 'all' | 'vip' | 'old' | 'new',
+    keyword?: string,
+    sort?: 'default' | 'newest' | 'oldest' | 'vip' | 'waitTime',
+    limit?: number,
+    offset?: number
+  } = {}) {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      const params = new URLSearchParams()
+
+      // 状态筛选
+      if (filters.status && filters.status !== 'all') {
+        params.append('status', filters.status)
+      }
+
+      // 时间范围筛选
+      if (filters.timeStart) {
+        params.append('time_start', filters.timeStart.toString())
+      }
+      if (filters.timeEnd) {
+        params.append('time_end', filters.timeEnd.toString())
+      }
+
+      // 坐席筛选
+      if (filters.agent && filters.agent !== 'all') {
+        params.append('agent', filters.agent)
+      }
+
+      // 客户类型筛选
+      if (filters.customerType && filters.customerType !== 'all') {
+        params.append('customer_type', filters.customerType)
+      }
+
+      // 关键词搜索
+      if (filters.keyword && filters.keyword.trim()) {
+        params.append('keyword', filters.keyword.trim())
+      }
+
+      // 排序方式
+      if (filters.sort) {
+        params.append('sort', filters.sort)
+      }
+
+      // 分页参数
+      params.append('limit', (filters.limit || 50).toString())
+      params.append('offset', (filters.offset || 0).toString())
+
+      const url = `/api/sessions?${params.toString()}`
+      const response = await fetch(url)
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      if (data.success) {
+        sessions.value = data.data.sessions
+        total.value = data.data.total
+        console.log(`✅ 高级筛选成功: 找到 ${total.value} 个会话，显示 ${sessions.value.length} 个`)
+        return data.data
+      } else {
+        throw new Error(data.error || '筛选失败')
+      }
+    } catch (err: any) {
+      error.value = err.message
+      console.error('❌ 高级筛选失败:', err)
+      throw err
     } finally {
       isLoading.value = false
     }
@@ -323,6 +404,7 @@ export const useSessionStore = defineStore('session', () => {
 
     // 方法
     fetchSessions,
+    fetchSessionsAdvanced, // 【L1-1-Part1-模块1】新增高级筛选方法
     fetchStats,
     fetchSessionDetail,
     takeoverSession,

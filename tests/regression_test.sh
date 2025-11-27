@@ -171,8 +171,61 @@ else
     ((FAIL++))
 fi
 
-# 测试11: TypeScript检查 (agent-workbench)
-echo -n "测试11: TypeScript检查... "
+# 【L1-1-Part1-模块1】新增测试: 会话高级筛选与搜索
+echo ""
+echo "=== 【模块1】会话高级筛选与搜索测试 ==="
+echo ""
+
+# 测试11: VIP客户筛选
+echo -n "测试11: VIP客户筛选... "
+RESULT=$(curl -s "$BASE_URL/api/sessions?customer_type=vip&limit=5" | grep -c '"success":true' || true)
+if [ "$RESULT" -gt 0 ]; then
+    echo -e "${GREEN}✅ 通过${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ 失败${NC}"
+    ((FAIL++))
+fi
+
+# 测试12: 关键词搜索
+echo -n "测试12: 关键词搜索... "
+RESULT=$(curl -s "$BASE_URL/api/sessions?keyword=%E5%BC%A0%E4%B8%89&limit=5" | grep -c '"success":true' || true)
+if [ "$RESULT" -gt 0 ]; then
+    echo -e "${GREEN}✅ 通过${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ 失败${NC}"
+    ((FAIL++))
+fi
+
+# 测试13: VIP优先排序
+echo -n "测试13: VIP优先排序... "
+RESULT=$(curl -s "$BASE_URL/api/sessions?sort=vip&limit=5" | grep -c '"success":true' || true)
+if [ "$RESULT" -gt 0 ]; then
+    echo -e "${GREEN}✅ 通过${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ 失败${NC}"
+    ((FAIL++))
+fi
+
+# 测试14: 组合筛选(VIP+pending状态)
+echo -n "测试14: 组合筛选... "
+RESULT=$(curl -s "$BASE_URL/api/sessions?customer_type=vip&status=pending_manual&limit=5" | grep -c '"success":true' || true)
+if [ "$RESULT" -gt 0 ]; then
+    echo -e "${GREEN}✅ 通过${NC}"
+    ((PASS++))
+else
+    echo -e "${RED}❌ 失败${NC}"
+    ((FAIL++))
+fi
+
+echo ""
+echo "=== TypeScript类型检查 ==="
+echo ""
+
+# 测试15: TypeScript检查 (agent-workbench)
+echo -n "测试15: TypeScript检查... "
 if cd agent-workbench && npx vue-tsc --noEmit > /dev/null 2>&1; then
     echo -e "${GREEN}✅ 通过${NC}"
     ((PASS++))
@@ -182,8 +235,8 @@ else
 fi
 cd ..
 
-# 测试12: TypeScript检查 (frontend)
-echo -n "测试12: 用户前端TypeScript检查... "
+# 测试16: TypeScript检查 (frontend)
+echo -n "测试16: 用户前端TypeScript检查... "
 if cd frontend && npx vue-tsc --noEmit > /dev/null 2>&1; then
     echo -e "${GREEN}✅ 通过${NC}"
     ((PASS++))

@@ -24,75 +24,38 @@ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 // 【阶段2】使用 SSE 实时推送替代轮询
 const { startMonitoring, stopMonitoring } = useAgentWorkbenchSSE()
 
-// 【L1-1-Part1-模块1】高级筛选状态
+// 当前筛选状态
 const currentFilter = ref<SessionStatus | 'all'>('pending_manual')
-const timeRange = ref<'today' | 'last3days' | 'last7days' | 'thisMonth' | 'custom'>('today')
-const customTimeStart = ref<Date | null>(null)
-const customTimeEnd = ref<Date | null>(null)
-const customerType = ref<'all' | 'vip' | 'old' | 'new'>('all')
-const sortBy = ref<'default' | 'newest' | 'oldest' | 'vip' | 'waitTime'>('default')
 
 // 搜索关键词
 const searchKeyword = ref('')
 
-// 【L1-1-Part1-模块1】应用高级筛选
-const applyAdvancedFilter = async () => {
-  // 计算时间范围
-  let timeStart: number | undefined = undefined
-  let timeEnd: number | undefined = undefined
-
-  const now = Date.now() / 1000  // 转为秒级时间戳
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
-  if (timeRange.value === 'today') {
-    timeStart = today.getTime() / 1000
-  } else if (timeRange.value === 'last3days') {
-    timeStart = now - (3 * 24 * 3600)
-  } else if (timeRange.value === 'last7days') {
-    timeStart = now - (7 * 24 * 3600)
-  } else if (timeRange.value === 'thisMonth') {
-    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1)
-    timeStart = firstDay.getTime() / 1000
-  } else if (timeRange.value === 'custom') {
-    if (customTimeStart.value) {
-      timeStart = customTimeStart.value.getTime() / 1000
-    }
-    if (customTimeEnd.value) {
-      timeEnd = customTimeEnd.value.getTime() / 1000
-    }
-  }
-
-  // 调用高级筛选API
-  await sessionStore.fetchSessionsAdvanced({
-    status: currentFilter.value,
-    timeStart,
-    timeEnd,
-    customerType: customerType.value,
-    keyword: searchKeyword.value,
-    sort: sortBy.value
-  })
-}
-
-// 监听筛选条件变化
-watch([currentFilter, timeRange, customerType, sortBy], () => {
-  applyAdvancedFilter()
-})
-
-// 监听搜索关键词变化（防抖500ms）
-let searchDebounce: NodeJS.Timeout | null = null
-watch(searchKeyword, () => {
-  if (searchDebounce) {
-    clearTimeout(searchDebounce)
-  }
-  searchDebounce = setTimeout(() => {
-    applyAdvancedFilter()
-  }, 500)
-})
-
-// 过滤后的会话列表（已由store返回，直接使用）
+// 过滤后的会话列表
 const filteredSessions = computed(() => {
-  return sessionStore.sessions
+  if (!searchKeyword.value.trim()) {
+    return sessionStore.sessions
+  }
+
+  const keyword = searchKeyword.value.toLowerCase().trim()
+  return sessionStore.sessions.filter(session => {
+    // 搜索会话ID
+    if (session.session_name.toLowerCase().includes(keyword)) {
+      return true
+    }
+    // 搜索用户昵称
+    if (session.user_profile?.nickname?.toLowerCase().includes(keyword)) {
+      return true
+    }
+    // 搜索最后消息内容
+    if (session.last_message_preview?.content.toLowerCase().includes(keyword)) {
+      return true
+    }
+    // 搜索坐席名称
+    if (session.assigned_agent?.name.toLowerCase().includes(keyword)) {
+      return true
+    }
+    return false
+  })
 })
 
 // 聊天输入
@@ -197,12 +160,28 @@ const handleTakeover = async (sessionName: string) => {
 }
 
 // 切换筛选
-// const handleFilterChange = async (filter: SessionStatus | 'all') => {
-//   currentFilter.value = filter
-//   if (filter === 'all') {
-//     await sessionStore.fetchSessions()
-//   } else {
-//     await sessionStore.setFilter(filter)
+const handleFilterChange = async (filter: SessionStatus | 'all') => {
+  currentFilter.value = filter
+  if (filter === 'all') {
+    await sessionStore.fetchSessions()
+  } else {
+    await sessionStore.setFilter(filter)
+  }
+}
+
+// 刷新数据 - 已由SSE替代，保留备用
+// const refreshData = async () => {
+//   const status = currentFilter.value === 'all' ? undefined : currentFilter.value
+//   await Promise.all([
+//     sessionStore.fetchSessions(status),
+//     sessionStore.fetchStats()
+//   ])
+//
+//   // 如果有选中的会话，也刷新会话详情（获取新消息）
+//   if (sessionStore.currentSessionName) {
+//     await sessionStore.fetchSessionDetail(sessionStore.currentSessionName)
+//     // 自动滚动到底部
+//     await scrollToBottom()
 //   }
 // }
 
@@ -317,9 +296,6 @@ onMounted(async () => {
   // 2. 资源节省：83% 减少网络请求（30s 轮询 vs 5s 轮询）
   // 3. 精准推送：只推送变化的会话，不需要全量刷新
   await startMonitoring()
-
-  // 【L1-1-Part1-模块1】初始加载：应用高级筛选
-  await applyAdvancedFilter()
 })
 
 onUnmounted(() => {
@@ -413,58 +389,24 @@ onUnmounted(() => {
           <button
             class="filter-tab"
             :class="{ active: currentFilter === 'pending_manual' }"
-            @click="currentFilter = 'pending_manual'"
+            @click="handleFilterChange('pending_manual')"
           >
             待接入
           </button>
           <button
             class="filter-tab"
             :class="{ active: currentFilter === 'manual_live' }"
-            @click="currentFilter = 'manual_live'"
+            @click="handleFilterChange('manual_live')"
           >
             服务中
           </button>
           <button
             class="filter-tab"
             :class="{ active: currentFilter === 'all' }"
-            @click="currentFilter = 'all'"
+            @click="handleFilterChange('all')"
           >
             全部
           </button>
-        </div>
-
-        <!-- 【L1-1-Part1-模块1】高级筛选栏 -->
-        <div class="advanced-filters">
-          <!-- 时间范围筛选 -->
-          <div class="filter-group">
-            <select v-model="timeRange" class="filter-select">
-              <option value="today">今天</option>
-              <option value="last3days">最近3天</option>
-              <option value="last7days">最近7天</option>
-              <option value="thisMonth">本月</option>
-            </select>
-          </div>
-
-          <!-- 客户类型筛选 -->
-          <div class="filter-group">
-            <select v-model="customerType" class="filter-select">
-              <option value="all">全部客户</option>
-              <option value="vip">VIP客户</option>
-              <option value="old">老客户</option>
-              <option value="new">新客户</option>
-            </select>
-          </div>
-
-          <!-- 排序方式 -->
-          <div class="filter-group">
-            <select v-model="sortBy" class="filter-select">
-              <option value="default">默认排序</option>
-              <option value="newest">最新优先</option>
-              <option value="oldest">最早优先</option>
-              <option value="vip">VIP优先</option>
-              <option value="waitTime">等待时长</option>
-            </select>
-          </div>
         </div>
 
         <!-- 搜索框 -->
@@ -695,9 +637,9 @@ onUnmounted(() => {
 }
 
 .dashboard-header {
-  background: #2C3E50;
-  padding: 12px 24px;
-  border-bottom: 1px solid #34495E;
+  background: linear-gradient(135deg, #4ECDC4 0%, #52C7B8 100%);
+  padding: 18px 32px;
+  box-shadow: 0 2px 16px rgba(78, 205, 196, 0.2);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -711,22 +653,38 @@ onUnmounted(() => {
 }
 
 .brand-logo-img {
-  height: 32px;
+  height: 40px;
   width: auto;
-  filter: brightness(0) invert(1);
+  filter: brightness(0) invert(1) drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+  animation: fadeIn 0.6s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 .brand-text h1 {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 20px;
+  font-weight: 700;
   color: white;
   margin: 0;
   line-height: 1.2;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: -0.3px;
 }
 
 .brand-subtitle {
-  display: none;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-weight: 500;
 }
 
 .agent-info {
@@ -738,27 +696,41 @@ onUnmounted(() => {
 .agent-status {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(10px);
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
 }
 
 .status-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 .status-dot.online {
-  background: #27AE60;
+  background: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.8);
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.1);
+  }
 }
 
 .status-text {
-  font-size: 12px;
+  font-size: 13px;
   color: white;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .agent-details {
@@ -768,14 +740,14 @@ onUnmounted(() => {
 }
 
 .agent-name {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   color: white;
 }
 
 .agent-id {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
 }
 
 /* 管理员菜单按钮 (v3.1.3+) */
@@ -786,41 +758,51 @@ onUnmounted(() => {
 .admin-menu-button {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
+  gap: 8px;
+  padding: 10px 18px;
   background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 4px;
-  font-size: 13px;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  font-size: 14px;
   color: white;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .admin-menu-button:hover {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.admin-menu-button:active {
+  transform: translateY(0);
 }
 
 .logout-button {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
-  background: rgba(231, 76, 60, 0.15);
-  border: 1px solid rgba(231, 76, 60, 0.3);
-  border-radius: 4px;
-  font-size: 13px;
+  gap: 8px;
+  padding: 10px 18px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  font-size: 14px;
   color: white;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .logout-button:hover {
-  background: rgba(231, 76, 60, 0.25);
-  border-color: rgba(231, 76, 60, 0.4);
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.35);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .dashboard-body {
@@ -842,63 +824,99 @@ onUnmounted(() => {
 .stats-bar {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  padding: 14px 16px;
-  gap: 10px;
-  border-bottom: 1px solid #E5E7EB;
-  background: #FAFAFA;
+  padding: 20px 16px 16px;
+  gap: 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: linear-gradient(to bottom, #f9fafb, white);
 }
 
 .stat-item {
   text-align: center;
-  padding: 12px 8px;
-  border-radius: 4px;
+  padding: 16px 12px;
+  border-radius: 12px;
   cursor: pointer;
-  transition: all 0.2s ease;
-  border: 1px solid #E5E7EB;
-  background: white;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  border: 2px solid transparent;
+}
+
+.stat-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.4));
+  opacity: 0;
+  transition: opacity 0.3s;
 }
 
 .stat-item:hover {
-  border-color: #3498DB;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+  transform: translateY(-4px);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.12);
+}
+
+.stat-item:hover::before {
+  opacity: 1;
 }
 
 .stat-item.pending {
-  background: #FFF8E1;
-  border-color: #FFA726;
+  background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%);
+  border-color: #ffa726;
+}
+
+.stat-item.pending:hover {
+  box-shadow: 0 8px 20px rgba(255, 167, 38, 0.3);
 }
 
 .stat-item.live {
-  background: #E8F5E9;
-  border-color: #27AE60;
+  background: linear-gradient(135deg, #e0f7f7 0%, #b2ebeb 100%);
+  border-color: #4ECDC4;
+}
+
+.stat-item.live:hover {
+  box-shadow: 0 8px 20px rgba(78, 205, 196, 0.4);
 }
 
 .stat-item.all {
-  background: #F5F5F5;
-  border-color: #9E9E9E;
+  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+  border-color: #9ca3af;
+}
+
+.stat-item.all:hover {
+  box-shadow: 0 8px 20px rgba(156, 163, 175, 0.3);
 }
 
 .stat-value {
   display: block;
-  font-size: 24px;
-  font-weight: 700;
-  color: #2C3E50;
+  font-size: 28px;
+  font-weight: 800;
+  color: #1f2937;
   margin-bottom: 4px;
+  position: relative;
+  z-index: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .stat-label {
   font-size: 11px;
-  color: #7F8C8D;
-  font-weight: 500;
+  color: #6b7280;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  position: relative;
+  z-index: 1;
 }
 
 /* 详细统计 */
 .detailed-stats {
   display: flex;
-  padding: 10px 16px;
+  padding: 12px 16px;
   gap: 16px;
-  border-bottom: 1px solid #E5E7EB;
-  background: white;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fafafa;
 }
 
 .detail-stat {
@@ -909,102 +927,61 @@ onUnmounted(() => {
 
 .detail-label {
   font-size: 11px;
-  color: #95A5A6;
+  color: #9ca3af;
 }
 
 .detail-value {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  color: #2C3E50;
+  color: #374151;
 }
 
 .filter-tabs {
   display: flex;
-  padding: 10px 16px;
+  padding: 12px 16px;
   gap: 8px;
-  border-bottom: 1px solid #E5E7EB;
-  background: white;
+  border-bottom: 1px solid #e5e7eb;
 }
 
 .filter-tab {
   flex: 1;
-  padding: 7px 0;
-  background: transparent;
+  padding: 8px;
+  background: #f3f4f6;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: 6px;
   font-size: 13px;
-  color: #7F8C8D;
-  font-weight: 500;
+  color: #6b7280;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.2s;
 }
 
 .filter-tab.active {
-  color: #3498DB;
-  border-bottom-color: #3498DB;
+  background: #4ECDC4;
+  color: white;
 }
 
 .filter-tab:hover:not(.active) {
-  color: #5DADE2;
-}
-
-/* 【L1-1-Part1-模块1】高级筛选栏样式 */
-.advanced-filters {
-  display: flex;
-  padding: 10px 16px;
-  gap: 8px;
-  border-bottom: 1px solid #E5E7EB;
-  background: white;
-}
-
-.filter-group {
-  flex: 1;
-}
-
-.filter-select {
-  width: 100%;
-  padding: 6px 10px;
-  border: 1px solid #E5E7EB;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #2C3E50;
-  background: #FAFAFA;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.filter-select:hover {
-  border-color: #3498DB;
-  background: white;
-}
-
-.filter-select:focus {
-  outline: none;
-  border-color: #3498DB;
-  background: white;
+  background: #e5e7eb;
 }
 
 /* 搜索框 */
 .search-box {
-  padding: 10px 16px;
+  padding: 0 16px 12px;
   position: relative;
-  background: white;
 }
 
 .search-box .search-input {
   width: 100%;
-  padding: 8px 36px 8px 12px;
-  border: 1px solid #E5E7EB;
-  border-radius: 4px;
+  padding: 10px 36px 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
   font-size: 13px;
   outline: none;
-  transition: border-color 0.2s ease;
-  background: #FAFAFA;
+  transition: border-color 0.2s;
 }
 
 .search-box .search-input:focus {
-  border-color: #3498DB;
-  background: white;
+  border-color: #4ECDC4;
 }
 
 .search-clear {
@@ -1128,40 +1105,41 @@ onUnmounted(() => {
 }
 
 .action-btn {
-  padding: 7px 14px;
+  padding: 8px 16px;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.2s;
 }
 
 .action-btn.primary {
-  background: #3498DB;
+  background: linear-gradient(135deg, #4ECDC4 0%, #52C7B8 100%);
   color: white;
 }
 
 .action-btn.primary:hover {
-  background: #2980B9;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(78, 205, 196, 0.4);
 }
 
 .action-btn.danger {
-  background: #E74C3C;
+  background: #ef4444;
   color: white;
 }
 
 .action-btn.danger:hover {
-  background: #C0392B;
+  background: #dc2626;
 }
 
 .action-btn.secondary {
-  background: #95A5A6;
+  background: #6366f1;
   color: white;
 }
 
 .action-btn.secondary:hover {
-  background: #7F8C8D;
+  background: #4f46e5;
 }
 
 /* 转接对话框样式 */
@@ -1180,10 +1158,10 @@ onUnmounted(() => {
 
 .dialog {
   background: white;
-  border-radius: 8px;
+  border-radius: 12px;
   width: 400px;
   max-width: 90%;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
 }
 
 .dialog-header {
@@ -1260,33 +1238,34 @@ onUnmounted(() => {
 }
 
 .btn-cancel {
-  padding: 7px 14px;
-  background: #ECF0F1;
-  border: 1px solid #BDC3C7;
-  border-radius: 4px;
+  padding: 8px 16px;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.2s;
 }
 
 .btn-cancel:hover {
-  background: #BDC3C7;
+  background: #e5e7eb;
 }
 
 .btn-confirm {
-  padding: 7px 14px;
-  background: #3498DB;
+  padding: 8px 16px;
+  background: linear-gradient(135deg, #4ECDC4 0%, #52C7B8 100%);
   color: white;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.2s;
 }
 
 .btn-confirm:hover:not(:disabled) {
-  background: #2980B9;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(78, 205, 196, 0.4);
 }
 
 .btn-confirm:disabled {
@@ -1471,24 +1450,25 @@ onUnmounted(() => {
 
 .message-input:focus {
   outline: none;
-  border-color: #3498DB;
+  border-color: #4ECDC4;
 }
 
 .send-btn {
-  padding: 10px 20px;
-  background: #3498DB;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #4ECDC4 0%, #52C7B8 100%);
   color: white;
   border: none;
-  border-radius: 4px;
+  border-radius: 8px;
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.2s;
   white-space: nowrap;
 }
 
 .send-btn:hover:not(:disabled) {
-  background: #2980B9;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(78, 205, 196, 0.4);
 }
 
 .send-btn:disabled {
@@ -1508,8 +1488,8 @@ onUnmounted(() => {
 
 .sidebar-tabs {
   display: flex;
-  border-bottom: 1px solid #E5E7EB;
-  background: #FAFAFA;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
 }
 
 .tab-button {
@@ -1517,29 +1497,29 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 12px 16px;
+  gap: 8px;
+  padding: 14px 16px;
   border: none;
   background: transparent;
-  color: #7F8C8D;
-  font-size: 13px;
+  color: #718096;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.2s;
   position: relative;
 }
 
 .tab-button svg {
-  transition: all 0.2s ease;
+  transition: all 0.2s;
 }
 
 .tab-button:hover {
-  background: white;
-  color: #3498DB;
+  background: rgba(78, 205, 196, 0.05);
+  color: #4ECDC4;
 }
 
 .tab-button.active {
-  color: #3498DB;
+  color: #4ECDC4;
   background: white;
 }
 
@@ -1550,7 +1530,7 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   height: 2px;
-  background: #3498DB;
+  background: #4ECDC4;
 }
 
 .sidebar-content {

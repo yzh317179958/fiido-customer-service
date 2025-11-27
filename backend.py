@@ -2179,14 +2179,28 @@ async def transfer_session(
 @app.get("/api/sessions")
 async def get_sessions(
     status: Optional[str] = None,
+    time_start: Optional[float] = None,  # Unix timestamp
+    time_end: Optional[float] = None,    # Unix timestamp
+    agent: Optional[str] = None,         # "all" / "mine" / "unassigned" / agent_id
+    customer_type: Optional[str] = None, # "all" / "vip" / "old" / "new"
+    keyword: Optional[str] = None,       # 搜索关键词
+    sort: Optional[str] = "default",     # "default" / "newest" / "oldest" / "vip" / "waitTime"
     limit: int = 50,
     offset: int = 0
 ):
     """
-    获取会话列表
+    获取会话列表 (增强版 - 支持高级筛选和搜索)
+
+    【模块1: 会话高级筛选与搜索】
 
     Query Parameters:
       - status: 会话状态过滤（pending_manual, manual_live等）
+      - time_start: 开始时间（Unix时间戳）
+      - time_end: 结束时间（Unix时间戳）
+      - agent: 坐席筛选（all/mine/unassigned/agent_id）
+      - customer_type: 客户类型（all/vip/old/new）
+      - keyword: 搜索关键词（搜索昵称、会话ID、消息内容）
+      - sort: 排序方式（default/newest/oldest/vip/waitTime）
       - limit: 每页数量（默认50）
       - offset: 偏移量（默认0）
     """
@@ -2194,29 +2208,122 @@ async def get_sessions(
         raise HTTPException(status_code=503, detail="SessionStore not initialized")
 
     try:
-        # 🔴 P0-3.1: 按状态查询
-        if status:
+        # 🔴 L1-1-Part1-F1: 获取所有会话或按状态筛选
+        if status and status != 'all':
             try:
                 status_enum = SessionStatus(status)
+                sessions = await session_store.list_by_status(
+                    status=status_enum,
+                    limit=10000,  # 先获取所有，再内存筛选
+                    offset=0
+                )
             except ValueError:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Invalid status: {status}. Valid values: {[s.value for s in SessionStatus]}"
                 )
-
-            sessions = await session_store.list_by_status(
-                status=status_enum,
-                limit=limit,
-                offset=offset
-            )
-            total = await session_store.count_by_status(status_enum)
         else:
-            # 🔴 P0-3.2: 获取所有会话
-            sessions = await session_store.list_all(limit=limit, offset=offset)
-            total = await session_store.count_all()
+            sessions = await session_store.list_all(limit=10000, offset=0)
 
-        # 🔴 P0-3.3: 转换为摘要格式
-        sessions_summary = [session.to_summary() for session in sessions]
+        # 🔴 L1-1-Part1-F1-2: 时间范围筛选
+        if time_start:
+            sessions = [s for s in sessions if s.created_at >= time_start]
+        if time_end:
+            sessions = [s for s in sessions if s.created_at <= time_end]
+
+        # 🔴 L1-1-Part1-F1-3: 坐席筛选
+        if agent and agent != 'all':
+            if agent == 'unassigned':
+                # 显示 pending_manual 状态的会话
+                sessions = [s for s in sessions if s.status == SessionStatus.PENDING_MANUAL]
+            elif agent == 'mine':
+                # TODO: 需要从JWT token中获取当前坐席ID
+                # 暂时跳过，需要权限中间件支持
+                pass
+            else:
+                # 指定坐席
+                sessions = [s for s in sessions if s.assigned_agent and s.assigned_agent.get('id') == agent]
+
+        # 🔴 L1-1-Part1-F1-4: 客户类型筛选
+        if customer_type and customer_type != 'all':
+            if customer_type == 'vip':
+                sessions = [s for s in sessions if s.user_profile and s.user_profile.vip]
+            elif customer_type == 'old':
+                # 老客户：有订单历史（暂时用 metadata 中的 order_count 判断）
+                sessions = [s for s in sessions if s.user_profile and s.user_profile.metadata.get('order_count', 0) > 0]
+            elif customer_type == 'new':
+                # 新客户：无订单历史
+                sessions = [s for s in sessions if not s.user_profile or s.user_profile.metadata.get('order_count', 0) == 0]
+
+        # 🔴 L1-1-Part1-F1-5: 关键词搜索
+        if keyword:
+            keyword_lower = keyword.lower().strip()
+            filtered_sessions = []
+            for session in sessions:
+                # 搜索会话ID
+                if keyword_lower in session.session_name.lower():
+                    filtered_sessions.append(session)
+                    continue
+                # 搜索客户昵称
+                if session.user_profile and session.user_profile.nickname:
+                    if keyword_lower in session.user_profile.nickname.lower():
+                        filtered_sessions.append(session)
+                        continue
+                # 搜索对话历史内容
+                if session.history:
+                    for msg in session.history:
+                        if keyword_lower in msg.content.lower():
+                            filtered_sessions.append(session)
+                            break
+                    else:
+                        # 如果内层循环正常结束(没有break),继续外层循环
+                        continue
+                    # 如果内层循环被break,说明找到了匹配,继续外层下一个session
+                    continue
+                # 搜索坐席名称
+                if session.assigned_agent and session.assigned_agent.name:
+                    if keyword_lower in session.assigned_agent.name.lower():
+                        filtered_sessions.append(session)
+                        continue
+            sessions = filtered_sessions
+
+        # 🔴 L1-1-Part1-F1-7: 智能排序
+        if sort == 'newest':
+            # 最新优先
+            sessions.sort(key=lambda s: s.updated_at, reverse=True)
+        elif sort == 'oldest':
+            # 最早优先
+            sessions.sort(key=lambda s: s.updated_at, reverse=False)
+        elif sort == 'vip':
+            # VIP优先，同级按时间
+            def vip_sort_key(s):
+                is_vip = s.user_profile.vip if s.user_profile else False
+                return (not is_vip, -s.updated_at)  # VIP在前，时间倒序
+            sessions.sort(key=vip_sort_key)
+        elif sort == 'waitTime':
+            # 等待时长优先
+            current_time = time.time()
+            sessions.sort(key=lambda s: -(current_time - s.created_at))
+        else:
+            # 默认排序：优先级 > 更新时间
+            def default_sort_key(s):
+                is_vip = s.user_profile.vip if s.user_profile else False
+                # 状态权重
+                status_weight = {
+                    SessionStatus.PENDING_MANUAL: 3,
+                    SessionStatus.MANUAL_LIVE: 2,
+                    SessionStatus.BOT_ACTIVE: 1,
+                    SessionStatus.CLOSED: 0
+                }.get(s.status, 1)
+                return (not is_vip, -status_weight, -s.updated_at)
+            sessions.sort(key=default_sort_key)
+
+        # 🔴 分页处理
+        total = len(sessions)
+        paginated_sessions = sessions[offset:offset + limit]
+
+        # 🔴 转换为摘要格式
+        sessions_summary = [session.to_summary() for session in paginated_sessions]
 
         return {
             "success": True,
@@ -2225,7 +2332,7 @@ async def get_sessions(
                 "total": total,
                 "limit": limit,
                 "offset": offset,
-                "has_more": (offset + len(sessions)) < total
+                "has_more": (offset + len(paginated_sessions)) < total
             }
         }
 
@@ -2233,6 +2340,8 @@ async def get_sessions(
         raise
     except Exception as e:
         print(f"❌ 获取会话列表失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
