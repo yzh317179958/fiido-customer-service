@@ -1,55 +1,72 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 const emit = defineEmits<{
   (e: 'select', content: string): void
 }>()
 
-// 快捷短语配置
-const quickReplies = ref([
-  {
-    id: 1,
-    category: '问候',
-    items: [
-      { id: 101, title: '欢迎语', content: '您好，我是人工客服，很高兴为您服务。请问有什么可以帮助您的？' },
-      { id: 102, title: '稍等', content: '好的，请您稍等，我正在为您查询相关信息。' },
-      { id: 103, title: '感谢等待', content: '感谢您的耐心等待，已为您查询到以下信息：' }
-    ]
-  },
-  {
-    id: 2,
-    category: '产品',
-    items: [
-      { id: 201, title: '产品咨询', content: '关于您咨询的产品，我来为您详细介绍一下：' },
-      { id: 202, title: '价格说明', content: '目前这款产品的价格是：' },
-      { id: 203, title: '库存确认', content: '我帮您查询了一下库存，目前该产品：' }
-    ]
-  },
-  {
-    id: 3,
-    category: '售后',
-    items: [
-      { id: 301, title: '退换货', content: '关于退换货，我们的政策是：7天无理由退换，15天质量问题可换货。请问您遇到了什么问题？' },
-      { id: 302, title: '维修服务', content: '我们提供全国联保服务，您可以：1. 寄回总部维修；2. 到当地授权服务点维修。' },
-      { id: 303, title: '物流查询', content: '我帮您查询了订单物流状态：' }
-    ]
-  },
-  {
-    id: 4,
-    category: '结束',
-    items: [
-      { id: 401, title: '问题解决', content: '很高兴能帮助到您！如果还有其他问题，随时联系我们。祝您生活愉快！' },
-      { id: 402, title: '后续跟进', content: '好的，我已记录您的问题，稍后会有专人跟进处理。请保持电话畅通。' },
-      { id: 403, title: '评价邀请', content: '感谢您的咨询！如果您对本次服务满意，欢迎给我们一个好评。再见！' }
-    ]
-  }
-])
+// API 基础地址配置（遵循 claude.md 规范）
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
-// 搜索关键词
+// 分类名称映射（后端 key -> 中文名称）
+const categoryNames: Record<string, string> = {
+  'greeting': '问候',
+  'pre_sales': '售前',
+  'after_sales': '售后',
+  'logistics': '物流',
+  'technical': '技术',
+  'closing': '结束',
+  'custom': '自定义'
+}
+
+// 分类排序（按此顺序显示）
+const categoryOrder = ['greeting', 'pre_sales', 'after_sales', 'logistics', 'technical', 'closing', 'custom']
+
+interface QuickReply {
+  id: string
+  title: string
+  content: string
+  category: string
+  shortcut_key?: string
+  is_shared: boolean
+  usage_count: number
+  variables?: string[]
+  created_by: string
+}
+
+interface CategoryGroup {
+  id: string
+  category: string
+  items: QuickReply[]
+}
+
+// 状态
+const quickRepliesRaw = ref<QuickReply[]>([])
+const isLoading = ref(false)
 const searchKeyword = ref('')
+const expandedCategory = ref<string | null>(null)
 
-// 当前展开的分类
-const expandedCategory = ref<number | null>(null)
+// 按分类分组
+const quickReplies = computed<CategoryGroup[]>(() => {
+  const grouped: Record<string, QuickReply[]> = {}
+
+  // 分组
+  quickRepliesRaw.value.forEach(reply => {
+    if (!grouped[reply.category]) {
+      grouped[reply.category] = []
+    }
+    grouped[reply.category].push(reply)
+  })
+
+  // 转换为数组并排序
+  return categoryOrder
+    .filter(cat => grouped[cat] && grouped[cat].length > 0)
+    .map(cat => ({
+      id: cat,
+      category: categoryNames[cat] || cat,
+      items: grouped[cat]
+    }))
+})
 
 // 过滤后的快捷短语
 const filteredReplies = computed(() => {
@@ -68,8 +85,31 @@ const filteredReplies = computed(() => {
   })).filter(category => category.items.length > 0)
 })
 
+// 加载快捷回复
+const loadQuickReplies = async () => {
+  try {
+    isLoading.value = true
+    const token = localStorage.getItem('access_token')
+
+    const response = await fetch(`${API_BASE}/api/quick-replies?limit=100&include_shared=true`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    })
+
+    const data = await response.json()
+    if (data.success) {
+      quickRepliesRaw.value = data.data.items
+    }
+  } catch (error) {
+    console.error('加载快捷回复失败:', error)
+  } finally {
+    isLoading.value = false
+  }
+}
+
 // 切换分类展开
-const toggleCategory = (categoryId: number) => {
+const toggleCategory = (categoryId: string) => {
   if (expandedCategory.value === categoryId) {
     expandedCategory.value = null
   } else {
@@ -81,6 +121,11 @@ const toggleCategory = (categoryId: number) => {
 const handleSelect = (content: string) => {
   emit('select', content)
 }
+
+// 初始化
+onMounted(() => {
+  loadQuickReplies()
+})
 </script>
 
 <template>
@@ -95,7 +140,14 @@ const handleSelect = (content: string) => {
       >
     </div>
 
-    <div class="categories">
+    <!-- 加载状态 -->
+    <div v-if="isLoading" class="loading-state">
+      <div class="loading-spinner"></div>
+      <span>加载中...</span>
+    </div>
+
+    <!-- 分类列表 -->
+    <div v-else class="categories">
       <div
         v-for="category in filteredReplies"
         :key="category.id"
@@ -123,16 +175,28 @@ const handleSelect = (content: string) => {
               class="reply-item"
               @click="handleSelect(item.content)"
             >
-              <span class="reply-title">{{ item.title }}</span>
-              <span class="reply-preview">{{ item.content.substring(0, 30) }}...</span>
+              <div class="reply-header">
+                <span class="reply-title">{{ item.title }}</span>
+                <span v-if="item.is_shared" class="shared-badge">🌐</span>
+              </div>
+              <span class="reply-preview">{{ item.content.substring(0, 40) }}...</span>
+              <div v-if="item.variables && item.variables.length > 0" class="reply-variables">
+                <span class="variables-label">变量:</span>
+                <span class="variable-tag" v-for="variable in item.variables" :key="variable">
+                  {{ '{' + variable + '}' }}
+                </span>
+              </div>
+              <div v-if="item.shortcut_key" class="reply-shortcut">
+                快捷键: Ctrl+{{ item.shortcut_key }}
+              </div>
             </div>
           </div>
         </transition>
       </div>
-    </div>
 
-    <div v-if="filteredReplies.length === 0" class="no-results">
-      未找到匹配的短语
+      <div v-if="filteredReplies.length === 0 && !isLoading" class="no-results">
+        未找到匹配的短语
+      </div>
     </div>
   </div>
 </template>
@@ -169,6 +233,31 @@ const handleSelect = (content: string) => {
 
 .search-input:focus {
   border-color: #667eea;
+}
+
+/* 加载状态 */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.loading-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 12px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .categories {
@@ -243,12 +332,22 @@ const handleSelect = (content: string) => {
   margin-bottom: 0;
 }
 
+.reply-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
 .reply-title {
-  display: block;
   font-size: 13px;
   font-weight: 500;
   color: #1f2937;
-  margin-bottom: 2px;
+}
+
+.shared-badge {
+  font-size: 11px;
+  opacity: 0.7;
 }
 
 .reply-preview {
@@ -258,6 +357,35 @@ const handleSelect = (content: string) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+
+.reply-variables {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.variables-label {
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.variable-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 3px;
+  font-family: monospace;
+}
+
+.reply-shortcut {
+  font-size: 11px;
+  color: #667eea;
+  margin-top: 4px;
 }
 
 .no-results {

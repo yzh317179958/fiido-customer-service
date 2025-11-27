@@ -212,9 +212,9 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { useAuthStore } from '../stores/auth'
+import { useAgentStore } from '../stores/agentStore'
 
-const authStore = useAuthStore()
+const authStore = useAgentStore()
 
 // API 基础地址配置（遵循 claude.md 规范）
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
@@ -267,8 +267,8 @@ const needsVariableInput = computed(() => {
 
 // 权限检查
 const canModify = (reply) => {
-  if (authStore.agent.role === 'admin') return true
-  return reply.created_by === authStore.agent.agent_id
+  if (authStore.agentRole === 'admin') return true
+  return reply.created_by === authStore.agentId
 }
 
 // 获取分类名称
@@ -279,9 +279,10 @@ const getCategoryName = (key) => {
 // 加载分类
 const loadCategories = async () => {
   try {
+    const token = localStorage.getItem('access_token')
     const response = await fetch(`${API_BASE}/api/quick-replies/categories`, {
       headers: {
-        'Authorization': `Bearer ${authStore.token}`
+        'Authorization': `Bearer ${token}`
       }
     })
     const data = await response.json()
@@ -309,13 +310,14 @@ const loadQuickReplies = async () => {
     }
 
     if (filters.value.onlyMine) {
-      params.append('agent_id', authStore.agent.agent_id)
+      params.append('agent_id', authStore.agentId)
       params.append('include_shared', 'false')
     }
 
+    const token = localStorage.getItem('access_token')
     const response = await fetch(`${API_BASE}/api/quick-replies?${params}`, {
       headers: {
-        'Authorization': `Bearer ${authStore.token}`
+        'Authorization': `Bearer ${token}`
       }
     })
 
@@ -367,11 +369,12 @@ const saveReply = async () => {
       : `${API_BASE}/api/quick-replies`
 
     const method = editingReply.value ? 'PUT' : 'POST'
+    const token = localStorage.getItem('access_token')
 
     const response = await fetch(url, {
       method,
       headers: {
-        'Authorization': `Bearer ${authStore.token}`,
+        'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
@@ -408,10 +411,11 @@ const deleteReply = async (reply) => {
   }
 
   try {
+    const token = localStorage.getItem('access_token')
     const response = await fetch(`${API_BASE}/api/quick-replies/${reply.id}`, {
       method: 'DELETE',
       headers: {
-        'Authorization': `Bearer ${authStore.token}`
+        'Authorization': `Bearer ${token}`
       }
     })
 
