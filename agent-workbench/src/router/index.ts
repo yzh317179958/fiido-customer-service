@@ -27,6 +27,15 @@ const router = createRouter({
         requiresAdmin: true  // 需要管理员权限
       }
     },
+    // ⭐ v3.7.0 新增：快捷回复管理
+    {
+      path: '/quick-replies',
+      name: 'QuickReplyManagement',
+      component: () => import('@/views/QuickReplyManagement.vue'),
+      meta: {
+        requiresAuth: true  // 所有坐席都可以访问
+      }
+    },
     {
       path: '/',
       redirect: '/dashboard'

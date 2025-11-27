@@ -369,6 +369,15 @@ onUnmounted(() => {
             </el-dropdown-menu>
           </template>
         </el-dropdown>
+        <!-- 快捷回复按钮 (v3.7.0+) -->
+        <button @click="router.push('/quick-replies')" class="quick-reply-nav-button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            <line x1="9" y1="10" x2="15" y2="10"></line>
+            <line x1="9" y1="14" x2="13" y2="14"></line>
+          </svg>
+          快捷回复
+        </button>
         <button @click="handleLogout" class="logout-button">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
@@ -831,6 +840,28 @@ onUnmounted(() => {
 .admin-menu-button:hover {
   background: rgba(255, 255, 255, 0.15);
   border-color: rgba(255, 255, 255, 0.25);
+}
+
+/* 快捷回复按钮 (v3.7.0+) */
+.quick-reply-nav-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: rgba(52, 152, 219, 0.15);
+  border: 1px solid rgba(52, 152, 219, 0.3);
+  border-radius: 4px;
+  font-size: 13px;
+  color: white;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-right: 12px;
+}
+
+.quick-reply-nav-button:hover {
+  background: rgba(52, 152, 219, 0.25);
+  border-color: rgba(52, 152, 219, 0.4);
 }
 
 .logout-button {
