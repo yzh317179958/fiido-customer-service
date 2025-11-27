@@ -301,12 +301,99 @@ else
     ((FAIL++))
 fi
 
+# 【模块3】新增测试: 快捷回复功能 v3.7.0
+echo ""
+echo "=== 【模块3】快捷回复功能测试 v3.7.0 ==="
+echo ""
+
+# 获取管理员 Token（用于测试）
+ADMIN_TOKEN=$(curl -s -X POST $BASE_URL/api/agent/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | python3 -c "import sys, json; print(json.load(sys.stdin).get('token', ''))" 2>/dev/null)
+
+if [ -z "$ADMIN_TOKEN" ]; then
+    echo -e "${YELLOW}⚠️  无法获取 Token，跳过快捷回复测试${NC}"
+else
+    # 测试19: 获取快捷回复分类
+    echo -n "测试19: 获取快捷回复分类... "
+    RESULT=$(curl -s "$BASE_URL/api/quick-replies/categories" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" | grep -c '"success":true' || true)
+    if [ "$RESULT" -gt 0 ]; then
+        echo -e "${GREEN}✅ 通过${NC}"
+        ((PASS++))
+    else
+        echo -e "${RED}❌ 失败${NC}"
+        ((FAIL++))
+    fi
+
+    # 测试20: 获取快捷回复列表
+    echo -n "测试20: 获取快捷回复列表... "
+    RESULT=$(curl -s "$BASE_URL/api/quick-replies?limit=10" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" | grep -c '"success":true' || true)
+    if [ "$RESULT" -gt 0 ]; then
+        echo -e "${GREEN}✅ 通过${NC}"
+        ((PASS++))
+    else
+        echo -e "${RED}❌ 失败${NC}"
+        ((FAIL++))
+    fi
+
+    # 测试21: 创建快捷回复
+    echo -n "测试21: 创建快捷回复... "
+    QR_ID=$(curl -s -X POST "$BASE_URL/api/quick-replies" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"title":"回归测试快捷回复","content":"这是回归测试创建的快捷回复","category":"greeting","is_shared":false}' \
+      | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('data', {}).get('id', '') if d.get('success') else '')" 2>/dev/null)
+    if [ -n "$QR_ID" ]; then
+        echo -e "${GREEN}✅ 通过${NC}"
+        ((PASS++))
+
+        # 测试22: 更新快捷回复
+        echo -n "测试22: 更新快捷回复... "
+        RESULT=$(curl -s -X PUT "$BASE_URL/api/quick-replies/$QR_ID" \
+          -H "Authorization: Bearer $ADMIN_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"title":"更新后的标题","content":"更新后的内容","category":"greeting","is_shared":true}' \
+          | grep -c '"success":true' || true)
+        if [ "$RESULT" -gt 0 ]; then
+            echo -e "${GREEN}✅ 通过${NC}"
+            ((PASS++))
+        else
+            echo -e "${RED}❌ 失败${NC}"
+            ((FAIL++))
+        fi
+
+        # 测试23: 删除快捷回复
+        echo -n "测试23: 删除快捷回复... "
+        RESULT=$(curl -s -X DELETE "$BASE_URL/api/quick-replies/$QR_ID" \
+          -H "Authorization: Bearer $ADMIN_TOKEN" | grep -c '"success":true' || true)
+        if [ "$RESULT" -gt 0 ]; then
+            echo -e "${GREEN}✅ 通过${NC}"
+            ((PASS++))
+        else
+            echo -e "${RED}❌ 失败${NC}"
+            ((FAIL++))
+        fi
+    else
+        echo -e "${RED}❌ 失败${NC}"
+        ((FAIL++))
+        # 跳过依赖的测试
+        echo -n "测试22: 更新快捷回复... "
+        echo -e "${YELLOW}⊘ 跳过（创建失败）${NC}"
+        ((FAIL++))
+        echo -n "测试23: 删除快捷回复... "
+        echo -e "${YELLOW}⊘ 跳过（创建失败）${NC}"
+        ((FAIL++))
+    fi
+fi
+
 echo ""
 echo "=== TypeScript类型检查 ==="
 echo ""
 
-# 测试19: TypeScript检查 (agent-workbench)
-echo -n "测试19: TypeScript检查... "
+# 测试24: TypeScript检查 (agent-workbench)
+echo -n "测试24: TypeScript检查... "
 if cd agent-workbench && npx vue-tsc --noEmit > /dev/null 2>&1; then
     echo -e "${GREEN}✅ 通过${NC}"
     ((PASS++))
@@ -316,8 +403,8 @@ else
 fi
 cd ..
 
-# 测试20: TypeScript检查 (frontend)
-echo -n "测试20: 用户前端TypeScript检查... "
+# 测试25: TypeScript检查 (frontend)
+echo -n "测试25: 用户前端TypeScript检查... "
 if cd frontend && npx vue-tsc --noEmit > /dev/null 2>&1; then
     echo -e "${GREEN}✅ 通过${NC}"
     ((PASS++))
