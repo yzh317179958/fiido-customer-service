@@ -2439,6 +2439,11 @@ async def get_sessions(
         total = len(sessions)
         paginated_sessions = sessions[offset:offset + limit]
 
+        # 【模块2】更新优先级信息（在转换为摘要前）
+        urgent_keywords = ["投诉", "退款", "质量问题", "差评", "赔偿"]
+        for session in paginated_sessions:
+            session.update_priority(urgent_keywords=urgent_keywords)
+
         # 🔴 转换为摘要格式
         sessions_summary = [session.to_summary() for session in paginated_sessions]
 

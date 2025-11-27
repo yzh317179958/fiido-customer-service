@@ -197,14 +197,10 @@ const handleTakeover = async (sessionName: string) => {
 }
 
 // 切换筛选
-// const handleFilterChange = async (filter: SessionStatus | 'all') => {
-//   currentFilter.value = filter
-//   if (filter === 'all') {
-//     await sessionStore.fetchSessions()
-//   } else {
-//     await sessionStore.setFilter(filter)
-//   }
-// }
+const handleFilterChange = (filter: SessionStatus | 'all') => {
+  currentFilter.value = filter
+  // watch会自动触发applyAdvancedFilter()
+}
 
 // 滚动到底部
 const scrollToBottom = async () => {

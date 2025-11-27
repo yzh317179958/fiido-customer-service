@@ -296,6 +296,16 @@ class SessionState(BaseModel):
                 "name": self.assigned_agent.name
             }
 
+        # 【模块2】添加优先级信息
+        if self.priority:
+            summary["priority"] = {
+                "level": self.priority.level,
+                "is_vip": self.priority.is_vip,
+                "wait_time_seconds": self.priority.wait_time_seconds,
+                "is_timeout": self.priority.is_timeout,
+                "urgent_keywords": self.priority.urgent_keywords
+            }
+
         return summary
 
 
