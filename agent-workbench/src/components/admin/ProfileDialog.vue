@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { useAdminStore } from '@/stores/adminStore'
 import { useAgentStore } from '@/stores/agentStore'
 import { ElMessage } from 'element-plus'
+import { getAgentInfo, setAgentInfo } from '@/utils/authStorage'
 
 const props = defineProps<{
   modelValue: boolean
@@ -72,12 +73,12 @@ const handleSubmit = async () => {
     // 更新本地存储的姓名
     if (updatedAgent && updatedAgent.name) {
       agentStore.agentName = updatedAgent.name
-      // 更新 localStorage
-      const saved = localStorage.getItem('agent_info')
+      const saved = getAgentInfo()
       if (saved) {
-        const data = JSON.parse(saved)
-        data.agentName = updatedAgent.name
-        localStorage.setItem('agent_info', JSON.stringify(data))
+        setAgentInfo({
+          ...saved,
+          agentName: updatedAgent.name
+        })
       }
     }
 

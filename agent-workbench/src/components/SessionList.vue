@@ -1,17 +1,24 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { SessionSummary } from '@/types'
 
-interface Props {
+const props = withDefaults(defineProps<{
   sessions: SessionSummary[]
   isLoading: boolean
   selectedSession?: string
-}
-
-defineProps<Props>()
+  density?: 'compact' | 'standard' | 'comfortable'
+  showPreview?: boolean
+}>(), {
+  density: 'standard',
+  showPreview: true
+})
 const emit = defineEmits<{
   (e: 'select', sessionName: string): void
   (e: 'takeover', sessionName: string): void
 }>()
+
+const densityClass = computed(() => `density-${props.density || 'standard'}`)
+const previewEnabled = computed(() => props.showPreview !== false)
 
 // 格式化等待时间
 const formatWaitingTime = (seconds: number) => {
@@ -93,15 +100,15 @@ const getPriorityConfig = (level: string) => {
 </script>
 
 <template>
-  <div class="session-list">
+  <div class="session-list" :class="densityClass">
     <!-- 加载状态 -->
-    <div v-if="isLoading" class="loading-state">
+    <div v-if="props.isLoading" class="loading-state">
       <div class="loading-spinner"></div>
       <span>加载中...</span>
     </div>
 
     <!-- 空状态 -->
-    <div v-else-if="sessions.length === 0" class="empty-state">
+    <div v-else-if="props.sessions.length === 0" class="empty-state">
       <div class="empty-icon">📭</div>
       <p>暂无会话</p>
     </div>
@@ -109,11 +116,11 @@ const getPriorityConfig = (level: string) => {
     <!-- 会话列表 -->
     <div v-else class="sessions">
       <div
-        v-for="session in sessions"
+        v-for="session in props.sessions"
         :key="session.session_name"
         class="session-item"
         :class="{
-          selected: selectedSession === session.session_name,
+          selected: props.selectedSession === session.session_name,
           pending: session.status === 'pending_manual'
         }"
         @click="emit('select', session.session_name)"
@@ -144,7 +151,7 @@ const getPriorityConfig = (level: string) => {
         </div>
 
         <!-- 最后一条消息 -->
-        <div v-if="session.last_message_preview" class="session-preview">
+          <div v-if="previewEnabled && session.last_message_preview" class="session-preview">
           <span class="preview-role">
             {{ session.last_message_preview.role === 'user' ? '用户' : 'AI' }}:
           </span>
@@ -229,6 +236,14 @@ const getPriorityConfig = (level: string) => {
   padding: 8px;
 }
 
+.session-list.density-compact .sessions {
+  padding: 4px;
+}
+
+.session-list.density-comfortable .sessions {
+  padding: 12px;
+}
+
 .session-item {
   background: white;
   border: 1px solid #e5e7eb;
@@ -238,6 +253,16 @@ const getPriorityConfig = (level: string) => {
   cursor: pointer;
   transition: all 0.2s;
   position: relative;
+}
+
+.session-list.density-compact .session-item {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+
+.session-list.density-comfortable .session-item {
+  padding: 16px 18px;
+  margin-bottom: 12px;
 }
 
 .session-item:hover {
@@ -363,6 +388,14 @@ const getPriorityConfig = (level: string) => {
   color: #6b7280;
   margin-bottom: 8px;
   line-height: 1.4;
+}
+
+.session-list.density-compact .session-preview {
+  font-size: 12px;
+}
+
+.session-list.density-comfortable .session-preview {
+  font-size: 14px;
 }
 
 .preview-role {

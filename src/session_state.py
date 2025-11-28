@@ -11,6 +11,7 @@
 
 import asyncio
 import json
+import os
 from typing import Optional, Dict, List, Any, Literal
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
@@ -165,6 +166,7 @@ class SessionState(BaseModel):
     # 时间戳
     created_at: float = Field(default_factory=lambda: round(datetime.now(timezone.utc).timestamp(), 3))
     updated_at: float = Field(default_factory=lambda: round(datetime.now(timezone.utc).timestamp(), 3))
+    manual_start_at: Optional[float] = None  # 最近一次人工服务开始时间
     last_manual_end_at: Optional[float] = None
 
     # AI 失败计数器 (用于检测连续失败)
@@ -257,6 +259,9 @@ class SessionState(BaseModel):
             if new_status == SessionStatus.BOT_ACTIVE and old_status == SessionStatus.MANUAL_LIVE:
                 self.last_manual_end_at = self.updated_at
                 self.assigned_agent = None
+                self.manual_start_at = None
+            elif new_status == SessionStatus.CLOSED and old_status == SessionStatus.MANUAL_LIVE:
+                self.manual_start_at = None
 
             return True
         return False
@@ -337,6 +342,10 @@ class SessionStateStore:
 
     async def count_by_status(self, status: SessionStatus) -> int:
         """统计指定状态的会话数量"""
+        raise NotImplementedError
+
+    async def clear_all(self) -> int:
+        """清空所有会话，返回清理数量"""
         raise NotImplementedError
 
 
@@ -497,6 +506,18 @@ class InMemorySessionStore(SessionStateStore):
                     if state.status != SessionStatus.CLOSED
                 )
             }
+
+    async def clear_all(self) -> int:
+        """清空所有会话"""
+        async with self._lock:
+            count = len(self._store)
+            self._store.clear()
+            if self.backup_file and os.path.exists(self.backup_file):
+                try:
+                    os.remove(self.backup_file)
+                except OSError:
+                    pass
+            return count
 
 
 # ==================== 全局单例 ====================

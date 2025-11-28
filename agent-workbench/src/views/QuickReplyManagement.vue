@@ -212,9 +212,22 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAgentStore } from '../stores/agentStore'
+import { getAccessToken } from '@/utils/authStorage'
 
 const authStore = useAgentStore()
+const router = useRouter()
+
+const requireToken = () => {
+  const token = getAccessToken()
+  if (!token) {
+    alert('认证信息已失效，请重新登录')
+    router.push('/login')
+    return null
+  }
+  return token
+}
 
 // API 基础地址配置（遵循 claude.md 规范）
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
@@ -279,7 +292,8 @@ const getCategoryName = (key) => {
 // 加载分类
 const loadCategories = async () => {
   try {
-    const token = localStorage.getItem('access_token')
+    const token = requireToken()
+    if (!token) return
     const response = await fetch(`${API_BASE}/api/quick-replies/categories`, {
       headers: {
         'Authorization': `Bearer ${token}`
@@ -314,7 +328,8 @@ const loadQuickReplies = async () => {
       params.append('include_shared', 'false')
     }
 
-    const token = localStorage.getItem('access_token')
+    const token = requireToken()
+    if (!token) return
     const response = await fetch(`${API_BASE}/api/quick-replies?${params}`, {
       headers: {
         'Authorization': `Bearer ${token}`
@@ -369,7 +384,8 @@ const saveReply = async () => {
       : `${API_BASE}/api/quick-replies`
 
     const method = editingReply.value ? 'PUT' : 'POST'
-    const token = localStorage.getItem('access_token')
+    const token = requireToken()
+    if (!token) return
 
     const response = await fetch(url, {
       method,
@@ -411,7 +427,8 @@ const deleteReply = async (reply) => {
   }
 
   try {
-    const token = localStorage.getItem('access_token')
+    const token = requireToken()
+    if (!token) return
     const response = await fetch(`${API_BASE}/api/quick-replies/${reply.id}`, {
       method: 'DELETE',
       headers: {

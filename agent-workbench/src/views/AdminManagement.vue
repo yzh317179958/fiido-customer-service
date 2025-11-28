@@ -73,11 +73,26 @@ const getRoleType = (role: AgentRole) => {
 }
 
 // 状态标签类型
-const getStatusType = (status: AgentStatus) => {
-  if (status === 'online') return 'success'
-  if (status === 'busy') return 'warning'
-  return 'info'
+const statusTagType: Record<AgentStatus, string> = {
+  online: 'success',
+  busy: 'warning',
+  break: 'warning',
+  lunch: 'warning',
+  training: 'primary',
+  offline: 'info'
 }
+
+const statusLabelMap: Record<AgentStatus, string> = {
+  online: '在线',
+  busy: '忙碌',
+  break: '小休',
+  lunch: '午休',
+  training: '培训',
+  offline: '离线'
+}
+
+const getStatusType = (status: AgentStatus) => statusTagType[status] || 'info'
+const getStatusLabel = (status: AgentStatus) => statusLabelMap[status] || status
 
 // 加载数据
 const loadData = async () => {
@@ -156,17 +171,19 @@ onMounted(async () => {
 <template>
   <div class="admin-container">
     <!-- 顶部工具栏 -->
-    <div class="admin-header">
-      <div class="header-left">
-        <el-button @click="handleBackToDashboard" link>
-          ← 返回工作台
-        </el-button>
-        <h1 class="page-title">坐席管理</h1>
-      </div>
-      <div class="header-right">
-        <span class="admin-name">管理员: {{ agentStore.agentName }}</span>
-      </div>
-    </div>
+<div class="admin-header">
+  <div class="header-left">
+    <el-button @click="handleBackToDashboard" link>
+      ← 返回工作台
+    </el-button>
+    <h1 class="page-title">坐席管理</h1>
+  </div>
+  <div class="header-right">
+    <span class="admin-name">管理员: {{ agentStore.agentName }}</span>
+    <el-button size="small" @click="handleEditProfile">编辑资料</el-button>
+    <el-button size="small" @click="handleChangePassword">修改密码</el-button>
+  </div>
+</div>
 
     <!-- 工具栏 -->
     <div class="toolbar">
@@ -210,8 +227,11 @@ onMounted(async () => {
           @change="loadData"
         >
           <el-option label="在线" value="online" />
-          <el-option label="离线" value="offline" />
           <el-option label="忙碌" value="busy" />
+          <el-option label="小休" value="break" />
+          <el-option label="午休" value="lunch" />
+          <el-option label="培训" value="training" />
+          <el-option label="离线" value="offline" />
         </el-select>
       </div>
     </div>
@@ -237,7 +257,7 @@ onMounted(async () => {
         <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)" size="small">
-              {{ row.status === 'online' ? '在线' : row.status === 'busy' ? '忙碌' : '离线' }}
+              {{ getStatusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>

@@ -123,6 +123,51 @@ export interface ManualMessageResponse {
   }
 }
 
+// 协助请求类型
+export type AssistStatus = 'pending' | 'answered'
+
+export interface AssistRequest {
+  id: string
+  session_name: string
+  requester: string
+  assistant: string
+  question: string
+  answer?: string | null
+  status: AssistStatus
+  created_at: number
+  answered_at?: number | null
+}
+
+// 会话转接相关
+export interface TransferHistoryRecord {
+  id: string
+  session_name: string
+  from_agent: string
+  from_agent_name?: string
+  to_agent: string
+  to_agent_name?: string
+  reason: string
+  note?: string
+  transferred_at: number
+  accepted: boolean
+  decision: 'accepted' | 'declined' | 'expired'
+  responded_at?: number
+  response_note?: string
+}
+
+export interface TransferRequest {
+  id: string
+  session_name: string
+  from_agent_id: string
+  from_agent_name?: string
+  to_agent_id: string
+  to_agent_name?: string
+  reason: string
+  note?: string
+  status: 'pending'
+  created_at: number
+}
+
 // ====================
 // 管理员功能类型定义 (v3.1.3+)
 // ====================
@@ -131,7 +176,23 @@ export interface ManualMessageResponse {
 export type AgentRole = 'admin' | 'agent'
 
 /** 坐席状态 */
-export type AgentStatus = 'online' | 'offline' | 'busy'
+export type AgentStatus = 'online' | 'busy' | 'break' | 'lunch' | 'training' | 'offline'
+
+/** 坐席工作状态详情 */
+export interface AgentStatusDetails {
+  status: AgentStatus
+  status_note: string
+  status_updated_at: number
+  last_active_at: number
+  current_sessions: number
+  max_sessions: number
+  today_stats: {
+    processed_count: number
+    avg_response_time: number
+    avg_duration: number
+    satisfaction_score: number
+  }
+}
 
 /** 完整坐席信息 */
 export interface Agent {
@@ -140,6 +201,9 @@ export interface Agent {
   name: string
   role: AgentRole
   status: AgentStatus
+  status_note?: string
+  status_updated_at?: number
+  last_active_at?: number
   max_sessions: number
   created_at: number
   last_login: number

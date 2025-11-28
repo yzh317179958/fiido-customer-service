@@ -536,6 +536,113 @@ if (result.success) {
 
 ---
 
+### 7. `GET /api/agent/status` - 获取坐席实时状态 ⭐ 新增 (v3.12.0)
+
+> 权限：`require_agent()`
+
+用于在工作台右上角展示当前登录坐席的状态、状态说明、当前/最大会话数以及今日绩效指标。
+
+```http
+GET /api/agent/status
+Authorization: Bearer <access_token>
+```
+
+**Response**
+```json
+{
+  "success": true,
+  "data": {
+    "status": "online",
+    "status_note": "午休结束，继续接入",
+    "status_updated_at": 1736754021.12,
+    "last_active_at": 1736754010.77,
+    "current_sessions": 2,
+    "max_sessions": 5,
+    "today_stats": {
+      "processed_count": 18,
+      "avg_response_time": 42.3,
+      "avg_duration": 512.5,
+      "satisfaction_score": 4.6
+    }
+  }
+}
+```
+
+> 说明：当 `AGENT_AUTO_BUSY_SECONDS`（默认300秒）内没有心跳上报时，系统会将 `online` 自动改为 `busy` 并写入系统提示。
+
+---
+
+### 8. `PUT /api/agent/status` - 更新坐席状态 ⭐ 新增 (v3.12.0)
+
+> 权限：`require_agent()`
+
+```json
+PUT /api/agent/status
+Authorization: Bearer <access_token>
+
+{
+  "status": "break",                 // 枚举: online/busy/break/lunch/training/offline
+  "status_note": "小休，5分钟后回来"    // 可选，<=120 字
+}
+```
+
+响应内容与 `GET /api/agent/status` 相同，返回最新状态快照。
+
+---
+
+### 9. `POST /api/agent/status/heartbeat` - 工作状态心跳 ⭐ 新增 (v3.12.0)
+
+> 权限：`require_agent()`
+
+前端每 120 秒调用一次，用于刷新 `last_active_at`，避免被动切换为忙碌。
+
+```http
+POST /api/agent/status/heartbeat
+Authorization: Bearer <access_token>
+
+Response:
+{
+  "success": true,
+  "last_active_at": 1736754123.55
+}
+```
+
+---
+
+### 10. `GET /api/agent/stats/today` - 今日工作统计 ⭐ 新增 (v3.12.0)
+
+> 权限：`require_agent()`
+
+按 “坐席 + 日期” 聚合的统计接口，数据存储在 Redis，Key 形如 `agent_stats:agent001:20250129`（TTL=86400）。
+
+```http
+GET /api/agent/stats/today
+Authorization: Bearer <access_token>
+```
+
+**Response**
+```json
+{
+  "success": true,
+  "data": {
+    "processed_count": 18,
+    "avg_response_time": 42.3,
+    "avg_duration": 512.5,
+    "satisfaction_score": 4.6,
+    "current_sessions": 2,
+    "max_sessions": 5
+  }
+}
+```
+
+> 统计口径：  
+> - `processed_count`：每次人工释放会话时 +1  
+> - `avg_response_time`：人工接入时记录（从升级时间 -> 接入时间）  
+> - `avg_duration`：`manual_start_at` 到释放时间  
+> - `satisfaction_score`：预留字段，可由后续满意度打分接口回写（默认值 0）
+
+---
+
 ### Token 使用示例
 
 #### 前端存储和使用

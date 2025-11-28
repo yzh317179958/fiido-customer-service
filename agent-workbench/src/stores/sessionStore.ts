@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { SessionSummary, SessionDetail, SessionStatus, QueueResponse, QueueSessionInfo } from '@/types'
+import { getAccessToken } from '@/utils/authStorage'
+
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
 export const useSessionStore = defineStore('session', () => {
   // 会话列表
@@ -60,12 +63,18 @@ export const useSessionStore = defineStore('session', () => {
     error.value = null
 
     try {
-      let url = `/api/sessions?limit=${limit}&offset=${offset}`
+      let url = `${API_BASE}/api/sessions?limit=${limit}&offset=${offset}`
       if (status) {
         url += `&status=${status}`
       }
 
-      const response = await fetch(url)
+      const token = getAccessToken()
+      const headers: HeadersInit = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
+      const response = await fetch(url, { headers })
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
@@ -143,8 +152,15 @@ export const useSessionStore = defineStore('session', () => {
       params.append('limit', (filters.limit || 50).toString())
       params.append('offset', (filters.offset || 0).toString())
 
-      const url = `/api/sessions?${params.toString()}`
-      const response = await fetch(url)
+      const url = `${API_BASE}/api/sessions?${params.toString()}`
+
+      const token = getAccessToken()
+      const headers: HeadersInit = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
+      const response = await fetch(url, { headers })
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
@@ -172,7 +188,13 @@ export const useSessionStore = defineStore('session', () => {
   // 获取统计信息
   async function fetchStats() {
     try {
-      const response = await fetch('/api/sessions/stats')
+      const token = getAccessToken()
+      const headers: HeadersInit = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
+      const response = await fetch(`${API_BASE}/api/sessions/stats`, { headers })
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
@@ -196,7 +218,13 @@ export const useSessionStore = defineStore('session', () => {
     currentSessionName.value = sessionName
 
     try {
-      const response = await fetch(`/api/sessions/${sessionName}`)
+      const token = getAccessToken()
+      const headers: HeadersInit = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
+      const response = await fetch(`${API_BASE}/api/sessions/${sessionName}`, { headers })
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -304,7 +332,8 @@ export const useSessionStore = defineStore('session', () => {
     fromAgentId: string,
     toAgentId: string,
     toAgentName: string,
-    reason: string = '坐席转接'
+    reason: string = '坐席转接',
+    note?: string
   ) {
     try {
       const response = await fetch(`/api/sessions/${sessionName}/transfer`, {
@@ -314,7 +343,8 @@ export const useSessionStore = defineStore('session', () => {
           from_agent_id: fromAgentId,
           to_agent_id: toAgentId,
           to_agent_name: toAgentName,
-          reason: reason
+          reason: reason,
+          note: note
         })
       })
 
@@ -330,10 +360,7 @@ export const useSessionStore = defineStore('session', () => {
       }
 
       if (data.success) {
-        console.log('✅ 转接会话成功:', sessionName, '->', toAgentName)
-        // 刷新列表
-        await fetchSessions(filterStatus.value || undefined)
-        await fetchStats()
+        console.log('✅ 已发送转接请求:', sessionName, '->', toAgentName)
         return true
       }
 
@@ -398,7 +425,13 @@ export const useSessionStore = defineStore('session', () => {
   // 【模块2】获取等待队列
   async function fetchQueue() {
     try {
-      const response = await fetch('/api/sessions/queue')
+      const token = getAccessToken()
+      const headers: HeadersInit = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
+      const response = await fetch(`${API_BASE}/api/sessions/queue`, { headers })
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)

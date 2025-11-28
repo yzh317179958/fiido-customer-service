@@ -44,61 +44,109 @@ const agentInfo = computed(() => chatStore.agentInfo)
 </script>
 
 <style scoped>
+/* Premium Status Bar */
 .status-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
+  padding: 12px 20px;
   border-bottom: 1px solid #e5e7eb;
-  background: #ffffff;
-  transition: all 0.3s ease;
+  background: linear-gradient(to bottom, #ffffff 0%, #fafbfc 100%);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  position: relative;
 }
 
-/* 状态指示器 */
+.status-bar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent 0%, var(--status-color) 50%, transparent 100%);
+  opacity: 0.5;
+  transition: opacity 0.3s ease;
+}
+
+/* Status indicator */
 .status-indicator {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  padding: 6px 14px;
+  background: linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%);
+  border-radius: 20px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.03);
+  transition: all 0.3s ease;
 }
 
-/* 状态点 */
+.status-indicator:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+
+/* Status dot */
 .status-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  animation: pulse 2s infinite;
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  box-shadow: 0 0 8px currentColor;
+  position: relative;
+}
+
+.status-dot::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  opacity: 0;
+  animation: ripple 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 /* AI 服务中 - 绿色 */
 .status-ai .status-dot {
   background: #10b981;
+  color: #10b981;
+  --status-color: #10b981;
 }
 
 /* 等待人工 - 橙色 */
 .status-pending .status-dot {
   background: #f59e0b;
+  color: #f59e0b;
+  --status-color: #f59e0b;
 }
 
 /* 人工服务中 - 蓝色 */
 .status-manual .status-dot {
   background: #3b82f6;
+  color: #3b82f6;
+  --status-color: #3b82f6;
 }
 
 /* 非工作时间 - 灰色 */
 .status-email .status-dot {
   background: #6b7280;
+  color: #6b7280;
+  --status-color: #6b7280;
 }
 
 /* 已关闭 - 红色 */
 .status-closed .status-dot {
   background: #ef4444;
+  color: #ef4444;
+  --status-color: #ef4444;
 }
 
 /* 状态文本 */
 .status-text {
   font-size: 13px;
-  font-weight: 500;
-  color: #6b7280;
+  font-weight: 600;
+  color: #374151;
+  letter-spacing: -0.01em;
 }
 
 /* 脉动动画 */
@@ -108,8 +156,19 @@ const agentInfo = computed(() => chatStore.agentInfo)
     transform: scale(1);
   }
   50% {
-    opacity: 0.7;
-    transform: scale(1.1);
+    opacity: 0.8;
+    transform: scale(1.15);
+  }
+}
+
+@keyframes ripple {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
   }
 }
 
@@ -118,20 +177,36 @@ const agentInfo = computed(() => chatStore.agentInfo)
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 4px 12px;
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+  border-radius: 16px;
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.15);
+  transition: all 0.3s ease;
+}
+
+.agent-info:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(59, 130, 246, 0.2);
 }
 
 .agent-avatar {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #3b82f6;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
   color: white;
-  font-weight: 500;
-  font-size: 12px;
+  font-weight: 600;
+  font-size: 13px;
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.3);
+  transition: all 0.3s ease;
+}
+
+.agent-avatar:hover {
+  transform: scale(1.1);
 }
 
 .agent-avatar img {
@@ -148,18 +223,23 @@ const agentInfo = computed(() => chatStore.agentInfo)
 .waiting-indicator {
   display: flex;
   align-items: center;
+  padding: 6px 12px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-radius: 16px;
+  box-shadow: 0 2px 6px rgba(245, 158, 11, 0.15);
 }
 
 .waiting-dots {
   display: flex;
-  gap: 4px;
+  gap: 5px;
 }
 
 .waiting-dots span {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #f59e0b;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  box-shadow: 0 1px 3px rgba(245, 158, 11, 0.3);
   animation: bounce 1.4s infinite ease-in-out both;
 }
 
@@ -174,9 +254,11 @@ const agentInfo = computed(() => chatStore.agentInfo)
 @keyframes bounce {
   0%, 80%, 100% {
     transform: scale(0);
+    opacity: 0.3;
   }
   40% {
     transform: scale(1);
+    opacity: 1;
   }
 }
 
@@ -184,20 +266,29 @@ const agentInfo = computed(() => chatStore.agentInfo)
 .after-hours-notice {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  background: #fef3c7;
-  border-radius: 12px;
+  gap: 8px;
+  padding: 6px 14px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-radius: 16px;
   font-size: 12px;
+  box-shadow: 0 2px 6px rgba(217, 119, 6, 0.15);
+  transition: all 0.3s ease;
+}
+
+.after-hours-notice:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(217, 119, 6, 0.2);
 }
 
 .notice-icon {
-  font-size: 14px;
+  font-size: 16px;
+  animation: pulse 2s ease-in-out infinite;
 }
 
 .notice-text {
   color: #92400e;
-  font-weight: 500;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 /* 响应式设计 */
@@ -207,7 +298,7 @@ const agentInfo = computed(() => chatStore.agentInfo)
   }
 
   .status-text {
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .agent-avatar {

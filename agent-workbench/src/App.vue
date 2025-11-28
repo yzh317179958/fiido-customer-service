@@ -27,5 +27,18 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: var(--agent-body-bg, #f4f6fb);
+  color: var(--agent-text-color, #111827);
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+:root {
+  --agent-body-bg: #f4f6fb;
+  --agent-text-color: #111827;
+}
+
+[data-agent-theme='dark'] {
+  --agent-body-bg: #050b18;
+  --agent-text-color: #e2e8f0;
 }
 </style>

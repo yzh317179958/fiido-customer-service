@@ -404,6 +404,28 @@ class RedisSessionStore(SessionStateStore):
             logger.error(f"❌ 获取所有会话失败: {e}")
             return []
 
+    async def clear_all(self) -> int:
+        """
+        清空所有会话数据
+
+        Returns:
+            删除的会话数量
+        """
+        try:
+            deleted = 0
+            session_keys = list(self.redis.scan_iter("session:*", count=100))
+            if session_keys:
+                deleted += self.redis.delete(*session_keys)
+
+            for status in SessionStatus:
+                self.redis.delete(f"status:{status.value}")
+
+            logger.warning(f"🧹 已清空会话数据: 删除 {deleted} 条记录")
+            return deleted
+        except Exception as e:
+            logger.error(f"❌ 清空会话数据失败: {e}")
+            return 0
+
     def check_health(self) -> dict:
         """
         健康检查（约束16.5.2 - 健康检查端点）

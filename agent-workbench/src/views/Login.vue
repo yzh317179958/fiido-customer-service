@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAgentStore } from '@/stores/agentStore'
 import axios from 'axios'
+import { setAccessToken, clearAccessToken } from '@/utils/authStorage'
 
 const router = useRouter()
 const agentStore = useAgentStore()
@@ -34,8 +35,8 @@ const handleLogin = async () => {
       throw new Error(response.data.message || '登录失败')
     }
 
-    // 保存Token（后端返回的是 token 字段，不是 access_token）
-    localStorage.setItem('access_token', response.data.token)
+    // 保存Token到当前标签，支持多账号同时登录
+    setAccessToken(response.data.token)
 
     // 保存用户信息到store
     await agentStore.login({
@@ -48,8 +49,7 @@ const handleLogin = async () => {
     router.push('/dashboard')
   } catch (err: any) {
     error.value = err.response?.data?.detail || err.message || '登录失败'
-    // 清除错误的token
-    localStorage.removeItem('access_token')
+    clearAccessToken()
   } finally {
     loading.value = false
   }

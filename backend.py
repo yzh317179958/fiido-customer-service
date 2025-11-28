@@ -19,15 +19,16 @@ from typing import Optional
 from contextlib import asynccontextmanager
 import uuid
 import hashlib
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Literal
 
 from cozepy import Coze, TokenAuth, JWTAuth, JWTOAuthApp
 import httpx
@@ -56,7 +57,8 @@ from src.agent_auth import (
     LoginRequest,
     LoginResponse,
     agent_to_dict,
-    Agent
+    Agent,
+    AgentStatus
 )
 
 # 【模块3】导入快捷回复系统模块
@@ -117,6 +119,16 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
+class UpdateAgentStatusRequest(BaseModel):
+    """坐席状态更新请求"""
+    status: AgentStatus
+    status_note: Optional[str] = Field(
+        default=None,
+        max_length=120,
+        description="状态说明（可选）"
+    )
+
+
 # 全局变量
 coze_client: Optional[Coze] = None
 token_manager: Optional[OAuthTokenManager] = None
@@ -139,6 +151,162 @@ conversation_cache: dict = {}  # {session_name: conversation_id}
 # P0-5: SSE 消息队列 - 用于人工消息推送
 # 结构: {session_name: asyncio.Queue()}
 sse_queues: dict = {}  # type: dict[str, asyncio.Queue]
+
+# 坐席状态相关配置
+AGENT_AUTO_BUSY_SECONDS = int(os.getenv("AGENT_AUTO_BUSY_SECONDS", "300"))
+AGENT_STATS_TTL = int(os.getenv("AGENT_STATS_TTL", "86400"))
+
+
+def _agent_stats_key(agent_identifier: str) -> str:
+    """构建坐席当日统计的 Redis Key"""
+    date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"agent_stats:{agent_identifier}:{date_key}"
+
+
+def _update_agent_stat(agent_identifier: str, field: str, amount: float, *, as_int: bool = False):
+    """更新坐席统计字段"""
+    if not agent_manager or not hasattr(agent_manager, "redis"):
+        return
+
+    redis_client = getattr(agent_manager, "redis", None)
+    if not redis_client:
+        return
+
+    key = _agent_stats_key(agent_identifier)
+    try:
+        if as_int:
+            redis_client.hincrby(key, field, int(amount))
+        else:
+            redis_client.hincrbyfloat(key, field, float(amount))
+        redis_client.expire(key, AGENT_STATS_TTL)
+    except Exception as exc:
+        print(f"⚠️ 更新坐席统计失败: {exc}")
+
+
+def _parse_float(value: Optional[str]) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_int(value: Optional[str]) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_agent_response_time(agent_identifier: str, seconds: float):
+    """记录坐席响应时间"""
+    if seconds is None or seconds < 0:
+        return
+    _update_agent_stat(agent_identifier, "total_response_time", seconds)
+    _update_agent_stat(agent_identifier, "response_samples", 1, as_int=True)
+
+
+def _record_agent_session_duration(agent_identifier: str, seconds: float):
+    """记录坐席处理时长并增加完成数"""
+    if seconds is None or seconds < 0:
+        return
+    _update_agent_stat(agent_identifier, "total_duration", seconds)
+    _update_agent_stat(agent_identifier, "duration_samples", 1, as_int=True)
+    _update_agent_stat(agent_identifier, "processed_count", 1, as_int=True)
+
+
+def _load_agent_stats(agent_identifier: str) -> Dict[str, Any]:
+    """读取坐席当日统计原始数据"""
+    if not agent_manager or not hasattr(agent_manager, "redis"):
+        return {}
+    redis_client = getattr(agent_manager, "redis", None)
+    if not redis_client:
+        return {}
+    key = _agent_stats_key(agent_identifier)
+    try:
+        return redis_client.hgetall(key) or {}
+    except Exception as exc:
+        print(f"⚠️ 读取坐席统计失败: {exc}")
+        return {}
+
+
+def _compose_today_stats(agent_identifier: str) -> Dict[str, Any]:
+    """组装今日统计指标"""
+    raw = _load_agent_stats(agent_identifier)
+    total_response = _parse_float(raw.get("total_response_time"))
+    response_samples = _parse_int(raw.get("response_samples"))
+    total_duration = _parse_float(raw.get("total_duration"))
+    duration_samples = _parse_int(raw.get("duration_samples"))
+    satisfaction_total = _parse_float(raw.get("satisfaction_total"))
+    satisfaction_samples = _parse_int(raw.get("satisfaction_samples"))
+    processed = _parse_int(raw.get("processed_count"))
+
+    avg_response = total_response / response_samples if response_samples else 0.0
+    avg_duration = total_duration / duration_samples if duration_samples else 0.0
+    satisfaction = satisfaction_total / satisfaction_samples if satisfaction_samples else 0.0
+
+    return {
+        "processed_count": processed,
+        "avg_response_time": round(avg_response, 2),
+        "avg_duration": round(avg_duration, 2),
+        "satisfaction_score": round(satisfaction, 2)
+    }
+
+
+async def _count_agent_live_sessions(agent_identifier: str) -> int:
+    """统计坐席当前处理中的会话数"""
+    if not session_store:
+        return 0
+    try:
+        live_sessions = await session_store.list_by_status(
+            status=SessionStatus.MANUAL_LIVE,
+            limit=500
+        )
+        return sum(
+            1
+            for session in live_sessions
+            if session.assigned_agent and session.assigned_agent.id == agent_identifier
+        )
+    except Exception as exc:
+        print(f"⚠️ 统计当前会话失败: {exc}")
+        return 0
+
+
+async def _build_agent_status_payload(agent_obj: Agent, agent_identifier: str) -> Dict[str, Any]:
+    """构建返回给前端的状态信息"""
+    today_stats = _compose_today_stats(agent_identifier)
+    current_sessions = await _count_agent_live_sessions(agent_identifier)
+    return {
+        "status": agent_obj.status.value if isinstance(agent_obj.status, AgentStatus) else agent_obj.status,
+        "status_note": agent_obj.status_note or "",
+        "status_updated_at": agent_obj.status_updated_at,
+        "last_active_at": agent_obj.last_active_at,
+        "current_sessions": current_sessions,
+        "max_sessions": agent_obj.max_sessions,
+        "today_stats": today_stats
+    }
+
+
+def _auto_adjust_agent_status(agent_obj: Agent) -> Agent:
+    """根据最近活跃时间自动切换状态"""
+    if not agent_manager:
+        return agent_obj
+
+    last_active = agent_obj.last_active_at or 0
+    now = time.time()
+    if (
+        agent_obj.status == AgentStatus.ONLINE
+        and AGENT_AUTO_BUSY_SECONDS > 0
+        and now - last_active > AGENT_AUTO_BUSY_SECONDS
+    ):
+        agent_obj.status = AgentStatus.BUSY
+        if not agent_obj.status_note:
+            agent_obj.status_note = "系统检测到超过5分钟无操作，已自动置为忙碌"
+        agent_obj.status_updated_at = now
+        try:
+            agent_manager.update_agent(agent_obj)
+        except Exception as exc:
+            print(f"⚠️ 自动更新坐席状态失败: {exc}")
+    return agent_obj
 
 
 @asynccontextmanager
@@ -2020,6 +2188,9 @@ async def release_session(session_name: str, request: dict):
     agent_id = request.get("agent_id")
     reason = request.get("reason", "resolved")
 
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id is required")
+
     try:
         # 获取会话状态
         session_state = await session_store.get(session_name)
@@ -2030,6 +2201,8 @@ async def release_session(session_name: str, request: dict):
         # 必须在manual_live状态才能释放
         if session_state.status != SessionStatus.MANUAL_LIVE:
             raise HTTPException(status_code=409, detail="Session not in manual_live status")
+
+        manual_start_at = session_state.manual_start_at
 
         # 添加系统消息
         system_message = Message(
@@ -2048,6 +2221,7 @@ async def release_session(session_name: str, request: dict):
 
         # 清除坐席信息
         session_state.assigned_agent = None
+        session_state.manual_start_at = None
 
         # 保存会话状态
         await session_store.save(session_state)
@@ -2078,6 +2252,14 @@ async def release_session(session_name: str, request: dict):
                 "timestamp": int(time.time())
             })
             print(f"✅ SSE 推送会话释放事件: {session_name}")
+
+        # 记录坐席工作统计
+        if manual_start_at:
+            service_duration = max(0.0, time.time() - manual_start_at)
+            _record_agent_session_duration(agent_id, service_duration)
+
+        if agent_manager:
+            agent_manager.update_last_active(agent_id)
 
         return {
             "success": True,
@@ -2118,6 +2300,7 @@ async def takeover_session(
         )
 
     try:
+        takeover_started_at = time.time()
         # 🔴 P0-2.1: 获取会话状态
         session_state = await session_store.get(session_name)
 
@@ -2156,6 +2339,9 @@ async def takeover_session(
                 status_code=500,
                 detail="状态转换失败"
             )
+
+        # 记录人工服务开始时间
+        session_state.manual_start_at = takeover_started_at
 
         # 🔴 P0-2.5: 添加系统消息
         system_message = Message(
@@ -2198,6 +2384,14 @@ async def takeover_session(
             })
 
             print(f"✅ SSE 推送坐席接入事件: {session_name}")
+
+        # 更新坐席统计信息
+        if session_state.escalation:
+            response_time = max(0.0, takeover_started_at - session_state.escalation.trigger_at)
+            _record_agent_response_time(agent_id, response_time)
+
+        if agent_manager:
+            agent_manager.update_last_active(agent_id)
 
         return {
             "success": True,
@@ -2269,80 +2463,46 @@ async def transfer_session(
                 detail="只有当前服务的坐席才能转接会话"
             )
 
-        # 更新坐席信息
-        from src.session_state import AgentInfo
+        from src.session_state import AgentInfo  # noqa: F401  # 保留以兼容后续处理
         old_agent_name = session_state.assigned_agent.name if session_state.assigned_agent else "未知"
 
-        session_state.assigned_agent = AgentInfo(
-            id=to_agent_id,
-            name=to_agent_name
-        )
-
-        # 添加系统消息
-        system_message = Message(
-            role="system",
-            content=f"会话已从【{old_agent_name}】转接至【{to_agent_name}】（原因：{reason}）"
-        )
-        session_state.add_message(system_message)
-
-        # ⭐ 新增：记录转接历史
-        transfer_record = {
-            "from_agent": from_agent_id,
+        # 创建待确认的转接请求
+        request_id = f"transfer_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+        created_at = time.time()
+        pending_request = {
+            "id": request_id,
+            "session_name": session_name,
+            "from_agent_id": from_agent_id,
             "from_agent_name": old_agent_name,
-            "to_agent": to_agent_id,
+            "to_agent_id": to_agent_id,
             "to_agent_name": to_agent_name,
             "reason": reason,
             "note": note,
-            "transferred_at": time.time(),
-            "accepted": True,  # 简化实现，自动接受
-            "accepted_at": time.time()
+            "status": "pending",
+            "created_at": created_at
         }
 
-        if session_name not in transfer_history_store:
-            transfer_history_store[session_name] = []
-        transfer_history_store[session_name].append(transfer_record)
-
-        # 保存会话状态
-        await session_store.save(session_state)
+        pending_transfer_requests.setdefault(to_agent_id, []).append(pending_request)
 
         # 记录日志
         print(json.dumps({
-            "event": "session_transferred",
+            "event": "transfer_requested",
             "session_name": session_name,
             "from_agent": from_agent_id,
             "to_agent": to_agent_id,
             "to_agent_name": to_agent_name,
             "reason": reason,
             "note": note,
-            "timestamp": int(time.time())
+            "timestamp": int(created_at)
         }, ensure_ascii=False))
 
-        # 推送 SSE 事件
-        if session_name in sse_queues:
-            # 推送系统消息
-            await sse_queues[session_name].put({
-                "type": "manual_message",
-                "role": "system",
-                "content": f"会话已从【{old_agent_name}】转接至【{to_agent_name}】",
-                "timestamp": system_message.timestamp
-            })
-            # 推送状态变化（坐席变更）
-            await sse_queues[session_name].put({
-                "type": "status_change",
-                "status": "manual_live",
-                "agent_info": {
-                    "agent_id": to_agent_id,
-                    "agent_name": to_agent_name
-                },
-                "reason": "transferred",
-                "timestamp": int(time.time())
-            })
-            print(f"✅ SSE 推送转接事件: {session_name}")
+        if agent_manager:
+            agent_manager.update_last_active(from_agent_id)
 
         return {
             "success": True,
-            "data": session_state.model_dump(),
-            "message": f"会话已转接至【{to_agent_name}】"
+            "data": pending_request,
+            "message": f"已向【{to_agent_name}】发送转接请求，等待对方确认"
         }
 
     except HTTPException:
@@ -2613,7 +2773,6 @@ async def agent_logout(username: str):
                 detail="坐席认证系统未初始化"
             )
 
-        from src.agent_auth import AgentStatus
         agent_manager.update_status(username, AgentStatus.OFFLINE)
 
         return {
@@ -2675,6 +2834,114 @@ async def get_agent_profile(username: str):
             status_code=500,
             detail=f"获取失败: {str(e)}"
         )
+
+
+@app.get("/api/agent/status")
+async def get_agent_status(agent: Dict[str, Any] = Depends(require_agent)):
+    """获取坐席当前状态"""
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席认证系统未初始化")
+
+        username = agent.get("username")
+        current_agent = agent_manager.get_agent_by_username(username)
+
+        if not current_agent:
+            raise HTTPException(status_code=404, detail="坐席不存在")
+
+        current_agent = _auto_adjust_agent_status(current_agent)
+        payload = await _build_agent_status_payload(current_agent, username)
+
+        return {
+            "success": True,
+            "data": payload
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"❌ 获取坐席状态失败: {exc}")
+        raise HTTPException(status_code=500, detail="获取坐席状态失败")
+
+
+@app.put("/api/agent/status")
+async def update_agent_status_api(
+    request: UpdateAgentStatusRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """更新坐席状态"""
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席认证系统未初始化")
+
+        username = agent.get("username")
+        updated_agent = agent_manager.update_status(
+            username=username,
+            status=request.status,
+            status_note=request.status_note
+        )
+
+        if not updated_agent:
+            raise HTTPException(status_code=404, detail="坐席不存在")
+
+        payload = await _build_agent_status_payload(updated_agent, username)
+        return {
+            "success": True,
+            "data": payload
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"❌ 更新坐席状态失败: {exc}")
+        raise HTTPException(status_code=500, detail="更新失败")
+
+
+@app.post("/api/agent/status/heartbeat")
+async def heartbeat_agent_status(agent: Dict[str, Any] = Depends(require_agent)):
+    """更新坐席心跳，用于自动状态判断"""
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席认证系统未初始化")
+
+        username = agent.get("username")
+        last_active = agent_manager.update_last_active(username)
+
+        return {
+            "success": True,
+            "last_active_at": last_active
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"❌ 坐席心跳上报失败: {exc}")
+        raise HTTPException(status_code=500, detail="心跳上报失败")
+
+
+@app.get("/api/agent/stats/today")
+async def get_agent_today_stats(agent: Dict[str, Any] = Depends(require_agent)):
+    """获取坐席今日统计"""
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席认证系统未初始化")
+
+        username = agent.get("username")
+        today_stats = _compose_today_stats(username)
+        current_sessions = await _count_agent_live_sessions(username)
+        current_agent = agent_manager.get_agent_by_username(username)
+
+        today_stats.update({
+            "current_sessions": current_sessions,
+            "max_sessions": current_agent.max_sessions if current_agent else 0
+        })
+
+        return {
+            "success": True,
+            "data": today_stats
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"❌ 获取坐席统计失败: {exc}")
+        raise HTTPException(status_code=500, detail="统计获取失败")
 
 
 @app.post("/api/agent/refresh")
@@ -2858,7 +3125,6 @@ async def get_available_agents(
         current_agent_id = agent.get("agent_id")
         available = []
 
-        from src.agent_auth import AgentStatus
         for a in all_agents:
             # 只返回在线且非当前登录坐席
             if a.id != current_agent_id and a.status == AgentStatus.ONLINE:
@@ -3165,6 +3431,23 @@ async def reset_agent_password(
         )
 
 
+@app.post("/api/admin/sessions/clear")
+async def clear_all_sessions(admin: Dict[str, Any] = Depends(require_admin)):
+    """
+    清空所有会话数据（管理员）
+    """
+    if not session_store:
+        raise HTTPException(status_code=503, detail="Session store not initialized")
+
+    cleared = await session_store.clear_all()
+    print(f"🧹 管理员 {admin.get('username')} 清空会话 {cleared} 条")
+
+    return {
+        "success": True,
+        "cleared": cleared
+    }
+
+
 @app.post("/api/agent/change-password")
 async def change_password(
     request: ChangePasswordRequest,
@@ -3317,8 +3600,6 @@ async def get_customer_profile(
     """
     获取客户画像信息
 
-    【MVP 阶段】返回模拟数据，后续集成 Shopify API
-
     Args:
         customer_id: 客户ID（当前为 session_id）
         agent: 坐席信息（来自 JWT）
@@ -3327,32 +3608,22 @@ async def get_customer_profile(
         客户画像数据
     """
     try:
-        # MVP 阶段：返回模拟数据
-        # TODO: 后续集成 Shopify API 获取真实客户数据
+        if not session_store:
+            raise HTTPException(status_code=503, detail="Session store not initialized")
 
-        # 从 session_id 提取基本信息作为演示
-        mock_customer = {
-            "customer_id": customer_id,
-            "name": "John Doe",
-            "email": "john.doe@example.com",
-            "phone": "+49 123 456789",
-            "country": "DE",
-            "city": "Berlin",
-            "language_preference": "de",
-            "payment_currency": "EUR",
-            "source_channel": "shopify_organic",
-            "gdpr_consent": True,
-            "marketing_subscribed": False,
-            "vip_status": "gold",
-            "avatar_url": None,
-            "created_at": int(time.time()) - 86400 * 30  # 30 天前注册
-        }
+        session_state = await session_store.get(customer_id)
+        if not session_state:
+            raise HTTPException(status_code=404, detail="CUSTOMER_NOT_FOUND: 会话不存在")
+
+        profile = session_state.user_profile
+        profile_dict = profile.model_dump()
+        profile_dict["customer_id"] = customer_id
 
         print(f"✅ 获取客户画像: customer_id={customer_id}, agent={agent.get('username')}")
 
         return {
             "success": True,
-            "data": mock_customer
+            "data": profile_dict
         }
 
     except HTTPException:
@@ -4136,6 +4407,24 @@ class TransferRequestEnhanced(BaseModel):
 
 # 转接历史存储
 transfer_history_store: Dict[str, List[Dict[str, Any]]] = {}
+pending_transfer_requests: Dict[str, List[Dict[str, Any]]] = {}
+
+
+class TransferResponseRequest(BaseModel):
+    """转接请求响应"""
+    action: Literal['accept', 'decline']
+    response_note: Optional[str] = ""
+
+
+def find_pending_transfer_request(request_id: str):
+    """
+    辅助函数：定位待处理转接请求
+    """
+    for agent_id, requests in pending_transfer_requests.items():
+        for index, request in enumerate(requests):
+            if request.get("id") == request_id:
+                return request, agent_id, index
+    return None, None, None
 
 
 @app.get("/api/sessions/{session_name}/transfer-history")
@@ -4171,6 +4460,200 @@ async def get_transfer_history(
             status_code=500,
             detail=f"获取失败: {str(e)}"
         )
+
+
+@app.get("/api/transfer-requests/pending")
+async def get_pending_transfer_requests(agent: dict = Depends(require_agent)):
+    """
+    获取当前登录坐席待处理的转接请求
+    """
+    try:
+        agent_id = agent.get("agent_id")
+        if not agent_id:
+            raise HTTPException(status_code=401, detail="UNAUTHORIZED")
+
+        requests = pending_transfer_requests.get(agent_id, [])
+        return {
+            "success": True,
+            "data": requests,
+            "total": len(requests)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 获取转接请求失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@app.post("/api/transfer-requests/{request_id}/respond")
+async def respond_transfer_request(
+    request_id: str,
+    response: TransferResponseRequest,
+    agent: dict = Depends(require_agent)
+):
+    """
+    处理转接请求（接受/拒绝）
+    """
+    try:
+        pending_request, owner_id, index = find_pending_transfer_request(request_id)
+        if not pending_request:
+            raise HTTPException(status_code=404, detail="REQUEST_NOT_FOUND: 转接请求不存在或已处理")
+
+        current_agent_id = agent.get("agent_id")
+        if owner_id != current_agent_id:
+            raise HTTPException(status_code=403, detail="PERMISSION_DENIED: 只能处理指向自己的转接请求")
+
+        # 移除待处理请求
+        pending_transfer_requests[owner_id].pop(index)
+        if not pending_transfer_requests[owner_id]:
+            del pending_transfer_requests[owner_id]
+
+        session_name = pending_request["session_name"]
+        from_agent_id = pending_request["from_agent_id"]
+        to_agent_id = pending_request["to_agent_id"]
+        to_agent_name = pending_request["to_agent_name"]
+        reason = pending_request["reason"]
+        note = pending_request.get("note", "")
+
+        # 统一记录历史
+        def append_history(record: Dict[str, Any]):
+            if session_name not in transfer_history_store:
+                transfer_history_store[session_name] = []
+            transfer_history_store[session_name].append(record)
+
+        if response.action == 'decline':
+            record = {
+                "id": request_id,
+                "session_name": session_name,
+                "from_agent": from_agent_id,
+                "from_agent_name": pending_request.get("from_agent_name"),
+                "to_agent": to_agent_id,
+                "to_agent_name": to_agent_name,
+                "reason": reason,
+                "note": note,
+                "transferred_at": pending_request.get("created_at"),
+                "accepted": False,
+                "decision": "declined",
+                "responded_at": time.time(),
+                "response_note": response.response_note or ""
+            }
+            append_history(record)
+
+            return {
+                "success": True,
+                "message": "已拒绝转接请求"
+            }
+
+        # 接受流程
+        if not session_store:
+            raise HTTPException(status_code=503, detail="SessionStore not initialized")
+
+        session_state = await session_store.get(session_name)
+        if not session_state:
+            raise HTTPException(status_code=404, detail="SESSION_NOT_FOUND: 会话不存在")
+
+        if session_state.status != SessionStatus.MANUAL_LIVE:
+            record = {
+                "id": request_id,
+                "session_name": session_name,
+                "from_agent": from_agent_id,
+                "from_agent_name": pending_request.get("from_agent_name"),
+                "to_agent": to_agent_id,
+                "to_agent_name": to_agent_name,
+                "reason": reason,
+                "note": note,
+                "transferred_at": pending_request.get("created_at"),
+                "accepted": False,
+                "decision": "expired",
+                "responded_at": time.time(),
+                "response_note": "会话状态已改变"
+            }
+            append_history(record)
+            raise HTTPException(status_code=409, detail="INVALID_STATUS: 会话状态已改变，无法接收转接")
+
+        if session_state.assigned_agent and session_state.assigned_agent.id != from_agent_id:
+            record = {
+                "id": request_id,
+                "session_name": session_name,
+                "from_agent": from_agent_id,
+                "from_agent_name": pending_request.get("from_agent_name"),
+                "to_agent": to_agent_id,
+                "to_agent_name": to_agent_name,
+                "reason": reason,
+                "note": note,
+                "transferred_at": pending_request.get("created_at"),
+                "accepted": False,
+                "decision": "expired",
+                "responded_at": time.time(),
+                "response_note": "会话已被其他坐席接管"
+            }
+            append_history(record)
+            raise HTTPException(status_code=409, detail="SESSION_ALREADY_TAKEN: 会话已经被其他坐席接管")
+
+        from src.session_state import AgentInfo
+
+        system_message = Message(
+            role="system",
+            content=f"会话已从【{pending_request.get('from_agent_name', '未知')}】转接至【{to_agent_name}】（原因：{reason}）"
+        )
+        session_state.add_message(system_message)
+        session_state.assigned_agent = AgentInfo(id=to_agent_id, name=to_agent_name)
+        session_state.manual_start_at = time.time()
+
+        await session_store.save(session_state)
+
+        record = {
+            "id": request_id,
+            "session_name": session_name,
+            "from_agent": from_agent_id,
+            "from_agent_name": pending_request.get("from_agent_name"),
+            "to_agent": to_agent_id,
+            "to_agent_name": to_agent_name,
+            "reason": reason,
+            "note": note,
+            "transferred_at": pending_request.get("created_at"),
+            "accepted": True,
+            "decision": "accepted",
+            "responded_at": time.time(),
+            "response_note": response.response_note or ""
+        }
+        append_history(record)
+
+        # 推送 SSE
+        if session_name in sse_queues:
+            await sse_queues[session_name].put({
+                "type": "manual_message",
+                "role": "system",
+                "content": system_message.content,
+                "timestamp": system_message.timestamp
+            })
+            await sse_queues[session_name].put({
+                "type": "status_change",
+                "status": "manual_live",
+                "agent_info": {
+                    "agent_id": to_agent_id,
+                    "agent_name": to_agent_name
+                },
+                "reason": "transferred",
+                "timestamp": int(time.time())
+            })
+
+        if agent_manager:
+            agent_manager.update_last_active(from_agent_id)
+            agent_manager.update_last_active(to_agent_id)
+
+        return {
+            "success": True,
+            "data": session_state.model_dump(),
+            "message": "已接受转接请求"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 处理转接请求失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
 
 # ==================== 【模块5】协助请求功能 ====================

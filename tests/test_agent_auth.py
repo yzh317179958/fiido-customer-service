@@ -63,6 +63,26 @@ def print_info(message: str):
     print(f"   {message}")
 
 
+def login_and_get_token(username: str = "admin", password: str = "admin123") -> Optional[str]:
+    """登录并返回访问 Token"""
+    try:
+        response = requests.post(
+            f"{BASE_URL}/api/agent/login",
+            headers=HEADERS,
+            json={
+                "username": username,
+                "password": password
+            }
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                return data.get("token")
+    except Exception as exc:
+        print_error(f"获取 Token 失败: {exc}")
+    return None
+
+
 def test_admin_login():
     """测试管理员登录"""
     print_test_header("管理员登录")
@@ -236,6 +256,119 @@ def test_get_nonexistent_profile():
             print_info(f"错误信息: {response.json().get('detail')}")
         else:
             print_error(f"应该返回 404，但返回了 {response.status_code}")
+
+    except Exception as e:
+        print_error(f"测试异常: {str(e)}")
+
+
+def test_agent_status_api():
+    """测试坐席状态管理接口"""
+    print_test_header("坐席状态管理")
+
+    token = login_and_get_token()
+    if not token:
+        print_error("无法获取 Token，跳过坐席状态测试")
+        return
+
+    auth_headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    json_headers = {
+        **auth_headers,
+        "Content-Type": "application/json"
+    }
+
+    try:
+        # 获取当前状态
+        response = requests.get(
+            f"{BASE_URL}/api/agent/status",
+            headers=auth_headers
+        )
+        if response.status_code != 200 or not response.json().get("success"):
+            print_error("获取坐席状态失败")
+            return
+
+        data = response.json()["data"]
+        required_fields = ["status", "status_note", "current_sessions", "today_stats"]
+        if all(field in data for field in required_fields):
+            print_success("成功获取坐席状态")
+        else:
+            print_error("坐席状态返回字段不完整")
+            return
+
+        # 更新状态为 break
+        update = requests.put(
+            f"{BASE_URL}/api/agent/status",
+            headers=json_headers,
+            json={
+                "status": "break",
+                "status_note": "测试小休"
+            }
+        )
+        if update.status_code == 200 and update.json().get("success"):
+            updated_data = update.json()["data"]
+            if updated_data["status"] == "break":
+                print_success("坐席状态更新成功")
+            else:
+                print_error("坐席状态更新未生效")
+        else:
+            print_error("坐席状态更新失败")
+            return
+
+        # 心跳上报
+        heartbeat = requests.post(
+            f"{BASE_URL}/api/agent/status/heartbeat",
+            headers=auth_headers
+        )
+        if heartbeat.status_code == 200 and heartbeat.json().get("success"):
+            print_success("坐席心跳上报成功")
+        else:
+            print_error("坐席心跳上报失败")
+
+    except Exception as e:
+        print_error(f"测试异常: {str(e)}")
+    finally:
+        # 恢复为在线状态
+        requests.put(
+            f"{BASE_URL}/api/agent/status",
+            headers=json_headers,
+            json={
+                "status": "online",
+                "status_note": ""
+            }
+        )
+
+
+def test_agent_today_stats():
+    """测试坐席今日统计接口"""
+    print_test_header("坐席今日统计")
+
+    token = login_and_get_token()
+    if not token:
+        print_error("无法获取 Token，跳过统计测试")
+        return
+
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+
+    try:
+        response = requests.get(
+            f"{BASE_URL}/api/agent/stats/today",
+            headers=headers
+        )
+
+        if response.status_code == 200 and response.json().get("success"):
+            data = response.json()["data"]
+            expected_fields = {"processed_count", "avg_response_time", "avg_duration", "satisfaction_score"}
+            if expected_fields.issubset(set(data.keys())):
+                print_success("成功获取坐席今日统计")
+                print_info(f"当前会话: {data.get('current_sessions', 0)}")
+                print_info(f"今日已处理: {data['processed_count']}")
+            else:
+                print_error("坐席今日统计返回字段缺失")
+        else:
+            print_error("坐席今日统计接口请求失败")
 
     except Exception as e:
         print_error(f"测试异常: {str(e)}")
@@ -422,6 +555,8 @@ def main():
     test_invalid_username()
     test_get_profile()
     test_get_nonexistent_profile()
+    test_agent_status_api()
+    test_agent_today_stats()
     test_token_refresh()
     test_invalid_refresh_token()
     test_logout()

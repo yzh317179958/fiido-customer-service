@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, nextTick, computed, watch } from 'vue'
+import { onMounted, onUnmounted, ref, nextTick, computed, watch, reactive } from 'vue'
 import { useAgentStore } from '@/stores/agentStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useRouter } from 'vue-router'
@@ -8,15 +8,43 @@ import QuickReplies from '@/components/QuickReplies.vue'
 import CustomerProfile from '@/components/customer/CustomerProfile.vue'
 import KeyboardShortcutsHelp from '@/components/KeyboardShortcutsHelp.vue'
 import NotificationSettingsDialog from '@/components/NotificationSettingsDialog.vue'
-import type { SessionStatus, CustomerProfile as CustomerProfileType } from '@/types'
+import AssistRequestDialog from '@/components/AssistRequestDialog.vue'
+import PersonalizationSettingsDialog from '@/components/PersonalizationSettingsDialog.vue'
+import type {
+  SessionStatus,
+  CustomerProfile as CustomerProfileType,
+  AgentStatusDetails
+} from '@/types'
 import { useAgentWorkbenchSSE } from '@/composables/useAgentWorkbenchSSE'
 import { useKeyboardShortcuts, type KeyboardShortcuts } from '@/composables/useKeyboardShortcuts'
 import { useNotification } from '@/composables/useNotification'
+import { getAccessToken } from '@/utils/authStorage'
 import axios from 'axios'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { useTransferStore } from '@/stores/transferStore'
+import { useAssistRequestStore } from '@/stores/assistRequestStore'
 
 const agentStore = useAgentStore()
 const sessionStore = useSessionStore()
 const router = useRouter()
+const settingsStore = useSettingsStore()
+settingsStore.init()
+const transferStore = useTransferStore()
+const assistRequestStore = useAssistRequestStore()
+
+let authWarningShown = false
+const requireAuthToken = (): string | null => {
+  const token = getAccessToken()
+  if (!token) {
+    if (!authWarningShown) {
+      authWarningShown = true
+      alert('认证信息已失效，请重新登录')
+      router.push('/login')
+    }
+    return null
+  }
+  return token
+}
 
 // 客户信息相关状态
 const customerProfile = ref<CustomerProfileType | null>(null)
@@ -36,16 +64,42 @@ const showShortcutsHelp = ref(false)
 
 // 【模块6.2.2】消息提醒系统
 const showNotificationSettings = ref(false)
-const {
-  notificationPermission,
-  unreadCount,
-  requestPermission,
-  notifyNewSession,
-  notifyCustomerReply,
-  notifyTransferRequest,
-  notifyAssistRequest,
-  clearUnreadCount
-} = useNotification()
+const { unreadCount } = useNotification()
+const showPersonalizationSettings = ref(false)
+
+// 【模块6.2.4】个性化设置状态
+const manualHistoryPending = ref<string | null>(null)
+const manualHistoryLoading = ref(false)
+const skipWatcherSession = ref<string | null>(null)
+
+const dashboardClasses = computed(() => [
+  `theme-${settingsStore.resolvedTheme}`,
+  `font-${settingsStore.settings.appearance.fontSize}`,
+  `bubble-${settingsStore.settings.appearance.bubbleStyle}`
+])
+const sessionListDensity = computed(() => settingsStore.settings.appearance.listDensity)
+const showMessagePreview = computed(() => settingsStore.settings.behavior.showMessagePreview)
+
+// 【模块6.2.3】坐席状态管理
+const agentStatus = ref<AgentStatusDetails | null>(null)
+const showStatusMenu = ref(false)
+const statusNoteInput = ref('')
+const isUpdatingStatus = ref(false)
+const isEditingStatusNote = ref(false)
+const statusMenuRef = ref<HTMLElement | null>(null)
+const statusOptions: Array<{
+  value: AgentStatusDetails['status']
+  label: string
+  description: string
+  icon: string
+}> = [
+  { value: 'online', label: '在线', description: '可接入新会话', icon: '🟢' },
+  { value: 'busy', label: '忙碌', description: '处理中，暂不接入', icon: '🟡' },
+  { value: 'break', label: '小休', description: '短暂离席', icon: '🟠' },
+  { value: 'lunch', label: '午休', description: '午间休息', icon: '🍱' },
+  { value: 'training', label: '培训', description: '参与培训', icon: '🔵' },
+  { value: 'offline', label: '离线', description: '停止接入', icon: '⚪' }
+]
 
 // 【模块6】搜索框引用
 const searchInputRef = ref<HTMLInputElement | null>(null)
@@ -111,7 +165,12 @@ watch([currentFilter, timeRange, customerType, sortBy], () => {
 })
 
 // 监听搜索关键词变化（防抖500ms）
-let searchDebounce: NodeJS.Timeout | null = null
+let searchDebounce: ReturnType<typeof setTimeout> | null = null
+let sessionRefreshTimer: ReturnType<typeof setInterval> | null = null
+let queueRefreshTimer: ReturnType<typeof setInterval> | null = null
+let statusPollTimer: ReturnType<typeof setInterval> | null = null
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+let transferRequestPoller: ReturnType<typeof setInterval> | null = null
 watch(searchKeyword, () => {
   if (searchDebounce) {
     clearTimeout(searchDebounce)
@@ -121,10 +180,27 @@ watch(searchKeyword, () => {
   }, 500)
 })
 
-// 过滤后的会话列表（已由store返回，直接使用）
-const filteredSessions = computed(() => {
-  return sessionStore.sessions
+watch(() => settingsStore.settings.behavior.autoLoadHistory, (auto) => {
+  if (auto && manualHistoryPending.value) {
+    handleManualHistoryLoad()
+  }
 })
+
+watch(() => settingsStore.settings.behavior.sessionRefreshInterval, () => {
+  setupAutoRefreshTimers()
+})
+
+watch(
+  () => agentStatus.value?.status_note,
+  (newNote) => {
+    if (!isEditingStatusNote.value) {
+      statusNoteInput.value = newNote || ''
+    }
+  }
+)
+
+// 过滤后的会话列表（已由store返回，直接使用）
+const filteredSessions = computed(() => sessionStore.sessions)
 
 // 聊天输入
 const messageInput = ref('')
@@ -134,9 +210,96 @@ const showQuickReplies = ref(false)
 
 // 转接对话框
 const showTransferDialog = ref(false)
+const transferSubmitting = ref(false)
 const transferTargetId = ref('')
-const transferTargetName = ref('')
-const transferReason = ref('')
+const transferNote = ref('')
+const transferReasonPresets = [
+  {
+    id: 'skill',
+    label: '专业技能',
+    description: '需要更专业的坐席处理技术类或复杂问题',
+    template: '需要技术支持坐席处理电池故障问题'
+  },
+  {
+    id: 'language',
+    label: '语言要求',
+    description: '客户需要特定语言服务',
+    template: '客户要求使用英语沟通'
+  },
+  {
+    id: 'workload',
+    label: '工作负载',
+    description: '当前会话较多，转给空闲坐席',
+    template: '当前会话数已满，请求空闲坐席接手'
+  },
+  {
+    id: 'customer',
+    label: '客户要求',
+    description: '客户指定历史坐席或特定人员',
+    template: '客户希望继续由上次服务的坐席跟进'
+  },
+  {
+    id: 'custom',
+    label: '其他',
+    description: '自定义转接原因',
+    template: ''
+  }
+]
+const selectedTransferReasonPreset = ref(transferReasonPresets[0]?.id || 'custom')
+const transferReason = ref(transferReasonPresets[0]?.template || '')
+const isCustomTransferReason = computed(() => selectedTransferReasonPreset.value === 'custom')
+const selectedTransferReasonPresetInfo = computed(() =>
+  transferReasonPresets.find(item => item.id === selectedTransferReasonPreset.value)
+)
+
+watch(selectedTransferReasonPreset, (presetId) => {
+  const preset = transferReasonPresets.find(item => item.id === presetId)
+  if (preset && !isCustomTransferReason.value) {
+    transferReason.value = preset.template
+  }
+})
+
+const showTransferRequestsPanel = ref(false)
+const respondingTransferRequestId = ref<string | null>(null)
+const transferResponseNotes = reactive<Record<string, string>>({})
+const pendingTransferRequests = computed(() => transferStore.pendingRequests)
+const pendingTransferCount = computed(() => transferStore.pendingRequests.length)
+const loadingPendingTransfers = computed(() => transferStore.loadingPending)
+const transferHistory = computed(() => transferStore.history)
+const loadingTransferHistory = computed(() => transferStore.loadingHistory)
+
+const showAssistCenter = ref(false)
+const assistTab = ref<'received' | 'sent'>('received')
+const assistFilter = ref<'pending' | 'answered' | 'all'>('pending')
+const assistResponseNotes = reactive<Record<string, string>>({})
+const replyingAssistRequestId = ref<string | null>(null)
+const assistPollTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const receivedAssistRequests = computed(() => assistRequestStore.received)
+const sentAssistRequests = computed(() => assistRequestStore.sent)
+const assistLoading = computed(() => assistRequestStore.loading)
+const assistPendingCount = computed(() => assistRequestStore.pendingCount)
+const visibleAssistRequests = computed(() =>
+  assistTab.value === 'received' ? receivedAssistRequests.value : sentAssistRequests.value
+)
+
+watch(() => sessionStore.currentSessionName, (sessionName) => {
+  if (sessionName) {
+    transferStore.fetchTransferHistory(sessionName).catch((error) => {
+      console.warn('⚠️ 获取转接历史失败:', error)
+    })
+  } else {
+    transferStore.clearHistory()
+  }
+})
+
+watch(assistFilter, (value) => {
+  assistRequestStore.fetchRequests(value).catch((error) => {
+    console.warn('⚠️ 切换协助请求筛选失败:', error)
+  })
+})
+
+// 【模块5】协助请求对话框
+const showAssistRequestDialog = ref(false)
 
 // 可转接的坐席列表（从API获取真实数据）
 interface AvailableAgent {
@@ -150,6 +313,23 @@ interface AvailableAgent {
 
 const availableAgents = ref<AvailableAgent[]>([])
 const loadingAgents = ref(false)
+
+// 仅保留在线且非当前坐席的协助候选
+const assistAvailableAgents = computed(() =>
+  availableAgents.value.filter(agent =>
+    agent.id !== agentStore.agentId && agent.status === 'online'
+  )
+)
+
+// 协助请求对话框所需字段
+const assistRequestOptions = computed(() =>
+  assistAvailableAgents.value.map(agent => ({
+    agent_id: agent.id,
+    username: agent.username,
+    name: agent.name,
+    status: agent.status
+  }))
+)
 
 // 处理快捷短语选择
 const handleQuickReplySelect = (content: string) => {
@@ -166,6 +346,22 @@ const formatTime = (seconds: number): string => {
   } else {
     return `${Math.round(seconds / 3600)}时`
   }
+}
+
+const formatRelativeTime = (timestamp?: number | null): string => {
+  if (!timestamp) {
+    return '-'
+  }
+  const now = Date.now() / 1000
+  const diff = now - timestamp
+  if (diff < 60) {
+    return '刚刚'
+  }
+  if (diff < 3600) {
+    return `${Math.floor(diff / 60)}分钟前`
+  }
+  const date = new Date(timestamp * 1000)
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
 // 格式化坐席状态标签
@@ -190,26 +386,209 @@ const getRoleLabel = (role: string): string => {
   return roleMap[role] || role
 }
 
-const handleLogout = () => {
-  if (confirm('确定要退出登录吗？')) {
-    agentStore.logout()
+const getTransferDecisionLabel = (decision: string): string => {
+  if (decision === 'accepted') return '已接受'
+  if (decision === 'declined') return '已拒绝'
+  if (decision === 'expired') return '已失效'
+  return '待确认'
+}
+
+const getTransferDecisionClass = (decision: string): string => {
+  if (decision === 'accepted') return 'history-accepted'
+  if (decision === 'declined') return 'history-declined'
+  if (decision === 'expired') return 'history-expired'
+  return 'history-pending'
+}
+
+const handleLogout = async () => {
+  if (!confirm('确定要退出登录吗？')) {
+    return
+  }
+
+  try {
+    await agentStore.logout()
+  } catch (error) {
+    console.warn('⚠️ 退出时更新状态失败:', error)
+  } finally {
     router.push('/login')
   }
 }
 
+// 【模块6.2.2】打开通知设置对话框
+const handleOpenNotificationSettings = () => {
+  console.log('🔔 打开通知设置对话框')
+  showNotificationSettings.value = true
+}
+
+const fetchAgentStatus = async () => {
+  try {
+    const token = requireAuthToken()
+    if (!token) return
+    const response = await axios.get(
+      `${API_BASE}/api/agent/status`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+    if (response.data.success) {
+      agentStatus.value = response.data.data
+      statusNoteInput.value = response.data.data.status_note || ''
+    }
+  } catch (error) {
+    console.warn('⚠️ 获取坐席状态失败:', error)
+  }
+}
+
+const sendHeartbeat = async () => {
+  try {
+    const token = requireAuthToken()
+    if (!token) return
+    await axios.post(
+      `${API_BASE}/api/agent/status/heartbeat`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+  } catch (error) {
+    console.warn('⚠️ 坐席心跳上报失败:', error)
+  }
+}
+
+const updateAgentStatus = async (statusValue: AgentStatusDetails['status'], note?: string) => {
+  try {
+    const token = requireAuthToken()
+    if (!token) return
+    isUpdatingStatus.value = true
+
+    const response = await axios.put(
+      `${API_BASE}/api/agent/status`,
+      {
+        status: statusValue,
+        status_note: note?.trim() ? note.trim() : undefined
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+
+    if (response.data.success) {
+      agentStatus.value = response.data.data
+      statusNoteInput.value = response.data.data.status_note || ''
+      showStatusMenu.value = false
+    }
+  } catch (error: any) {
+    alert(`更新状态失败: ${error.response?.data?.detail || error.message}`)
+  } finally {
+    isUpdatingStatus.value = false
+    isEditingStatusNote.value = false
+  }
+}
+
+const handleStatusSelect = async (statusValue: AgentStatusDetails['status']) => {
+  if (isUpdatingStatus.value) return
+  await updateAgentStatus(statusValue, statusNoteInput.value)
+}
+
+const saveStatusNote = async () => {
+  if (!agentStatus.value) return
+  await updateAgentStatus(agentStatus.value.status, statusNoteInput.value)
+}
+
+const toggleStatusMenu = () => {
+  showStatusMenu.value = !showStatusMenu.value
+}
+
+const handleDocumentClick = (event: MouseEvent) => {
+  if (!showStatusMenu.value) return
+  const target = event.target as Node
+  if (statusMenuRef.value && !statusMenuRef.value.contains(target)) {
+    showStatusMenu.value = false
+  }
+}
+
+const loadSessionData = async (sessionName: string) => {
+  skipWatcherSession.value = sessionName
+  manualHistoryLoading.value = true
+  manualHistoryPending.value = null
+  try {
+    await applyAdvancedFilter()
+    await sessionStore.fetchSessionDetail(sessionName)
+    await fetchCustomerProfile(sessionName)
+    await fetchInternalNotes(sessionName)
+    await maybeAutoTakeover()
+  } finally {
+    manualHistoryLoading.value = false
+    skipWatcherSession.value = null
+  }
+}
+
+const handleManualHistoryLoad = async () => {
+  if (!manualHistoryPending.value) return
+  await loadSessionData(manualHistoryPending.value)
+}
+
+async function maybeAutoTakeover() {
+  if (!settingsStore.settings.behavior.autoTakeover) return
+  const activeSession = sessionStore.currentSession
+  if (!activeSession || activeSession.status !== 'pending_manual') return
+  if (!agentStore.agentId) return
+  try {
+    await handleTakeover(activeSession.session_name, { silent: true })
+  } catch (error) {
+    console.warn('自动接入失败:', error)
+  }
+}
+
+const setupAutoRefreshTimers = () => {
+  if (sessionRefreshTimer) {
+    clearInterval(sessionRefreshTimer)
+    sessionRefreshTimer = null
+  }
+  if (queueRefreshTimer) {
+    clearInterval(queueRefreshTimer)
+    queueRefreshTimer = null
+  }
+
+  const interval = (settingsStore.settings.behavior.sessionRefreshInterval || 30) * 1000
+  sessionRefreshTimer = setInterval(() => {
+    applyAdvancedFilter()
+  }, interval)
+
+  queueRefreshTimer = setInterval(async () => {
+    await sessionStore.fetchQueue()
+  }, interval)
+}
+
 // 处理会话选择
 const handleSelectSession = async (sessionName: string) => {
-  await sessionStore.fetchSessionDetail(sessionName)
-  // 选中会话后自动加载客户信息和内部备注
-  fetchCustomerProfile(sessionName)
-  fetchInternalNotes(sessionName)
+  if (!settingsStore.settings.behavior.autoLoadHistory) {
+    sessionStore.currentSessionName = sessionName
+    sessionStore.currentSession = null
+    manualHistoryPending.value = sessionName
+    manualHistoryLoading.value = false
+    customerProfile.value = null
+    internalNotes.value = []
+    return
+  }
+  await loadSessionData(sessionName)
 }
 
 // 获取客户画像
 const fetchCustomerProfile = async (customerId: string) => {
   try {
     loadingCustomer.value = true
-    const token = localStorage.getItem('access_token')
+    const token = requireAuthToken()
+    if (!token) {
+      loadingCustomer.value = false
+      return
+    }
 
     const response = await axios.get(
       `${API_BASE}/api/customers/${customerId}/profile`,
@@ -234,6 +613,11 @@ const fetchCustomerProfile = async (customerId: string) => {
 // 监听当前会话变化
 watch(() => sessionStore.currentSessionName, (newSession) => {
   if (newSession) {
+    if (manualHistoryPending.value === newSession || skipWatcherSession.value === newSession) {
+      customerProfile.value = null
+      internalNotes.value = []
+      return
+    }
     fetchCustomerProfile(newSession)
     fetchInternalNotes(newSession)
   } else {
@@ -246,7 +630,11 @@ watch(() => sessionStore.currentSessionName, (newSession) => {
 const fetchInternalNotes = async (sessionName: string) => {
   try {
     loadingNotes.value = true
-    const token = localStorage.getItem('access_token')
+    const token = requireAuthToken()
+    if (!token) {
+      loadingNotes.value = false
+      return
+    }
 
     const response = await axios.get(
       `${API_BASE}/api/sessions/${sessionName}/notes`,
@@ -274,7 +662,11 @@ const handleAddNote = async () => {
 
   try {
     addingNote.value = true
-    const token = localStorage.getItem('access_token')
+    const token = requireAuthToken()
+    if (!token) {
+      addingNote.value = false
+      return
+    }
 
     const response = await axios.post(
       `${API_BASE}/api/sessions/${sessionStore.currentSession.session_name}/notes`,
@@ -313,7 +705,8 @@ const handleSaveEditNote = async (noteId: string) => {
   if (!editingNoteContent.value.trim() || !sessionStore.currentSession) return
 
   try {
-    const token = localStorage.getItem('access_token')
+    const token = requireAuthToken()
+    if (!token) return
 
     const response = await axios.put(
       `${API_BASE}/api/sessions/${sessionStore.currentSession.session_name}/notes/${noteId}`,
@@ -353,7 +746,8 @@ const handleDeleteNote = async (noteId: string) => {
   if (!sessionStore.currentSession) return
 
   try {
-    const token = localStorage.getItem('access_token')
+    const token = requireAuthToken()
+    if (!token) return
 
     await axios.delete(
       `${API_BASE}/api/sessions/${sessionStore.currentSession.session_name}/notes/${noteId}`,
@@ -408,7 +802,10 @@ const selectPreviousSession = () => {
 
   const currentIndex = sessions.findIndex(s => s.session_name === sessionStore.currentSessionName)
   const previousIndex = currentIndex > 0 ? currentIndex - 1 : sessions.length - 1
-  handleSelectSession(sessions[previousIndex].session_name)
+  const target = sessions[previousIndex]
+  if (target) {
+    handleSelectSession(target.session_name)
+  }
 }
 
 const selectNextSession = () => {
@@ -416,8 +813,11 @@ const selectNextSession = () => {
   if (sessions.length === 0) return
 
   const currentIndex = sessions.findIndex(s => s.session_name === sessionStore.currentSessionName)
-  const nextIndex = currentIndex < sessions.length - 1 ? currentIndex + 1 : 0
-  handleSelectSession(sessions[nextIndex].session_name)
+  const nextIndex = currentIndex >= 0 && currentIndex < sessions.length - 1 ? currentIndex + 1 : 0
+  const target = sessions[nextIndex]
+  if (target) {
+    handleSelectSession(target.session_name)
+  }
 }
 
 const closeCurrentPanel = () => {
@@ -525,18 +925,27 @@ const shortcuts: KeyboardShortcuts = {
 useKeyboardShortcuts(shortcuts)
 
 // 处理接入会话
-const handleTakeover = async (sessionName: string) => {
+async function handleTakeover(sessionName: string, options: { silent?: boolean } = {}) {
   try {
-    await sessionStore.takeoverSession(
+    const success = await sessionStore.takeoverSession(
       sessionName,
       agentStore.agentId,
       agentStore.agentName
     )
-    alert(`✅ 已成功接入会话`)
-    // 选中该会话
-    await sessionStore.fetchSessionDetail(sessionName)
+    if (success) {
+      if (!options.silent) {
+        alert(`✅ 已成功接入会话`)
+      }
+      await sessionStore.fetchSessionDetail(sessionName)
+      await fetchCustomerProfile(sessionName)
+      await fetchInternalNotes(sessionName)
+    }
   } catch (err: any) {
-    alert(`❌ 接入失败: ${err.message}`)
+    if (options.silent) {
+      console.warn('接入失败:', err.message || err)
+    } else {
+      alert(`❌ 接入失败: ${err.message}`)
+    }
   }
 }
 
@@ -601,17 +1010,45 @@ const handleRelease = async () => {
 
 // 处理回车发送
 const handleKeyPress = (event: KeyboardEvent) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault()
-    handleSendMessage()
+  const shortcut = settingsStore.settings.behavior.sendShortcut
+  if (shortcut === 'enter') {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      handleSendMessage()
+    }
+  } else if (shortcut === 'ctrlenter') {
+    if (event.key === 'Enter' && event.ctrlKey) {
+      event.preventDefault()
+      handleSendMessage()
+    }
   }
+}
+
+const mentionRegex = /@([a-zA-Z0-9_\-]+)/g
+const extractMentions = (text: string): string[] => {
+  const matches = text.matchAll(mentionRegex)
+  const mentions = new Set<string>()
+  for (const match of matches) {
+    if (match[1]) {
+      mentions.add(match[1])
+    }
+  }
+  return Array.from(mentions)
+}
+
+const formatNoteContent = (content: string) => {
+  return content.replace(mentionRegex, '<span class="mention-highlight">@$1</span>')
 }
 
 // 获取可转接的坐席列表
 const fetchAvailableAgents = async () => {
   try {
     loadingAgents.value = true
-    const token = localStorage.getItem('access_token')
+    const token = requireAuthToken()
+    if (!token) {
+      loadingAgents.value = false
+      return
+    }
     const response = await fetch(`${API_BASE}/api/agents/available`, {
       headers: {
         'Authorization': `Bearer ${token}`
@@ -647,15 +1084,32 @@ const openTransferDialog = async () => {
     return
   }
   transferTargetId.value = ''
-  transferTargetName.value = ''
-  transferReason.value = ''
+  transferReason.value = transferReasonPresets[0]?.template || ''
+  selectedTransferReasonPreset.value = transferReasonPresets[0]?.id || 'custom'
+  transferNote.value = ''
   showTransferDialog.value = true
+}
+
+// 打开协助请求对话框
+const openAssistRequestDialog = async () => {
+  await fetchAvailableAgents()
+  if (assistAvailableAgents.value.length === 0) {
+    alert('暂无在线可协助坐席')
+    return
+  }
+  showAssistRequestDialog.value = true
 }
 
 // 处理转接
 const handleTransfer = async () => {
+  if (transferSubmitting.value) return
   if (!transferTargetId.value || !sessionStore.currentSession) {
     alert('请选择要转接的坐席')
+    return
+  }
+
+  if (!transferReason.value.trim()) {
+    alert('请填写转接原因')
     return
   }
 
@@ -666,28 +1120,149 @@ const handleTransfer = async () => {
   }
 
   try {
+    transferSubmitting.value = true
     await sessionStore.transferSession(
       sessionStore.currentSession.session_name,
       agentStore.agentId,
       targetAgent.id,
       targetAgent.name,
-      transferReason.value || '坐席转接'
+      transferReason.value.trim(),
+      transferNote.value.trim() || undefined
     )
-    alert(`✅ 会话已转接至【${targetAgent.name}】`)
+    alert(`✅ 已向【${targetAgent.name}】发送转接请求，等待对方确认`)
     showTransferDialog.value = false
-    sessionStore.clearCurrentSession()
   } catch (err: any) {
     alert(`❌ 转接失败: ${err.message}`)
+  } finally {
+    transferSubmitting.value = false
+  }
+}
+
+// 【模块5】处理协助请求
+const handleAssistRequest = async (data: { assistant: string; question: string }) => {
+  if (!sessionStore.currentSession) {
+    alert('请先选择会话')
+    return
+  }
+
+  const token = requireAuthToken()
+  if (!token) return
+
+  try {
+    const response = await axios.post(
+      `${API_BASE}/api/assist-requests`,
+      {
+        session_name: sessionStore.currentSession.session_name,
+        assistant: data.assistant,
+        question: data.question
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+
+    if (response.data.success) {
+      alert(`✅ 协助请求已发送至【${data.assistant}】`)
+      showAssistRequestDialog.value = false
+      assistRequestStore.fetchRequests(assistFilter.value)
+    } else {
+      alert('❌ 发送失败')
+    }
+  } catch (err: any) {
+    alert(`❌ 发送失败: ${err.response?.data?.detail || err.message}`)
+  }
+}
+
+const openAssistCenter = async () => {
+  showAssistCenter.value = true
+  try {
+    await assistRequestStore.fetchRequests(assistFilter.value)
+  } catch (error) {
+    console.warn('⚠️ 获取协助请求失败:', error)
+  }
+}
+
+const closeAssistCenter = () => {
+  showAssistCenter.value = false
+}
+
+const handleAssistFilterChange = (value: 'pending' | 'answered' | 'all') => {
+  assistFilter.value = value
+}
+
+const handleAssistAnswer = async (requestId: string) => {
+  const note = assistResponseNotes[requestId]?.trim()
+  if (!note) {
+    alert('请输入回复内容')
+    return
+  }
+  if (replyingAssistRequestId.value) return
+  replyingAssistRequestId.value = requestId
+  try {
+    await assistRequestStore.answerRequest(requestId, note)
+    assistResponseNotes[requestId] = ''
+    await assistRequestStore.fetchRequests(assistFilter.value)
+    alert('✅ 已回复协助请求')
+  } catch (error: any) {
+    alert(error?.message || '回复失败')
+  } finally {
+    replyingAssistRequestId.value = null
+  }
+}
+
+const openTransferRequestsPanel = async () => {
+  showTransferRequestsPanel.value = true
+  try {
+    await transferStore.fetchPendingRequests()
+  } catch (error) {
+    console.warn('⚠️ 获取待处理转接请求失败:', error)
+  }
+}
+
+const closeTransferRequestsPanel = () => {
+  showTransferRequestsPanel.value = false
+}
+
+const handleTransferRequestResponse = async (requestId: string, action: 'accept' | 'decline') => {
+  if (respondingTransferRequestId.value) return
+  const targetRequest = pendingTransferRequests.value.find((req) => req.id === requestId)
+  const sessionName = targetRequest?.session_name
+  respondingTransferRequestId.value = requestId
+  try {
+    const note = transferResponseNotes[requestId] || ''
+    await transferStore.respondTransferRequest(requestId, action, note)
+    transferResponseNotes[requestId] = ''
+    if (action === 'accept') {
+      currentFilter.value = 'manual_live'
+      await sessionStore.fetchSessions('manual_live')
+    } else {
+      await applyAdvancedFilter()
+    }
+    await sessionStore.fetchStats()
+    if (action === 'accept' && sessionName) {
+      await handleSelectSession(sessionName)
+    }
+    alert(action === 'accept' ? '✅ 已接受转接请求' : '✅ 已拒绝转接请求')
+    if (transferStore.pendingRequests.length === 0) {
+      showTransferRequestsPanel.value = false
+    }
+  } catch (error: any) {
+    alert(error?.message || '处理转接请求失败')
+  } finally {
+    respondingTransferRequestId.value = null
   }
 }
 
 onMounted(async () => {
+  document.addEventListener('click', handleDocumentClick)
   // 【阶段2】使用 SSE 实时监听替代轮询
-  // 优势：
-  // 1. 实时性：< 100ms 推送延迟（之前轮询平均 2.5s）
-  // 2. 资源节省：83% 减少网络请求（30s 轮询 vs 5s 轮询）
-  // 3. 精准推送：只推送变化的会话，不需要全量刷新
   await startMonitoring()
+  await fetchAgentStatus()
+  await sendHeartbeat()
+  statusPollTimer = setInterval(fetchAgentStatus, 60000)
+  heartbeatTimer = setInterval(sendHeartbeat, 120000)
 
   // 【L1-1-Part1-模块1】初始加载：应用高级筛选
   await applyAdvancedFilter()
@@ -695,20 +1270,64 @@ onMounted(async () => {
   // 【模块2】加载队列数据
   await sessionStore.fetchQueue()
 
-  // 【模块2】每30秒刷新队列数据
-  setInterval(async () => {
-    await sessionStore.fetchQueue()
+  setupAutoRefreshTimers()
+
+  try {
+    await transferStore.fetchPendingRequests()
+  } catch (error) {
+    console.warn('⚠️ 初始化转接请求列表失败:', error)
+  }
+  transferRequestPoller = setInterval(() => {
+    transferStore.fetchPendingRequests().catch((error) => {
+      console.warn('⚠️ 刷新转接请求失败:', error)
+    })
+  }, 30000)
+
+  try {
+    await assistRequestStore.fetchRequests()
+  } catch (error) {
+    console.warn('⚠️ 初始化协助请求列表失败:', error)
+  }
+  assistPollTimer.value = setInterval(() => {
+    assistRequestStore.fetchRequests(assistFilter.value).catch((error) => {
+      console.warn('⚠️ 刷新协助请求失败:', error)
+    })
   }, 30000)
 })
 
 onUnmounted(() => {
   // 【阶段2】停止 SSE 监听
   stopMonitoring()
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer)
+    statusPollTimer = null
+  }
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+  if (sessionRefreshTimer) {
+    clearInterval(sessionRefreshTimer)
+    sessionRefreshTimer = null
+  }
+  if (transferRequestPoller) {
+    clearInterval(transferRequestPoller)
+    transferRequestPoller = null
+  }
+  if (assistPollTimer.value) {
+    clearInterval(assistPollTimer.value)
+    assistPollTimer.value = null
+  }
+  if (queueRefreshTimer) {
+    clearInterval(queueRefreshTimer)
+    queueRefreshTimer = null
+  }
+  document.removeEventListener('click', handleDocumentClick)
 })
 </script>
 
 <template>
-  <div class="dashboard-container">
+  <div class="dashboard-container" :class="dashboardClasses">
     <!-- 头部 -->
     <div class="dashboard-header">
       <div class="header-brand">
@@ -719,57 +1338,161 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="agent-info">
-        <div class="agent-status">
-          <span class="status-dot online"></span>
-          <span class="status-text">在线服务中</span>
+        <div class="agent-meta">
+          <div class="agent-status-card" ref="statusMenuRef">
+            <button class="status-trigger" type="button" @click.stop="toggleStatusMenu">
+              <div class="status-indicator">
+                <span class="status-dot" :class="agentStatus?.status || 'offline'"></span>
+                <span class="status-text">{{ getStatusLabel(agentStatus?.status || 'offline') }}</span>
+              </div>
+              <span class="status-updated" v-if="agentStatus">
+                更新 {{ formatRelativeTime(agentStatus.status_updated_at) }}
+              </span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </button>
+            <p v-if="agentStatus?.status_note" class="status-note-text">
+              {{ agentStatus.status_note }}
+            </p>
+            <div v-if="showStatusMenu" class="status-menu" @click.stop>
+              <div
+                v-for="option in statusOptions"
+                :key="option.value"
+                class="status-option"
+                :class="{ active: option.value === agentStatus?.status }"
+                @click.stop="handleStatusSelect(option.value)"
+              >
+                <div class="option-label">
+                  <span class="option-icon">{{ option.icon }}</span>
+                  <span>{{ option.label }}</span>
+                </div>
+                <div class="option-desc">{{ option.description }}</div>
+              </div>
+              <div class="status-note-editor">
+                <textarea
+                  v-model="statusNoteInput"
+                  rows="2"
+                  maxlength="120"
+                  placeholder="填写状态说明（选填）"
+                  @focus="isEditingStatusNote = true"
+                  @blur="isEditingStatusNote = false"
+                ></textarea>
+                <button class="status-save-button" :disabled="isUpdatingStatus" @click.stop="saveStatusNote">
+                  {{ isUpdatingStatus ? '保存中…' : '保存说明' }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="agent-details">
+            <span class="agent-name">{{ agentStore.agentName }}</span>
+            <span class="agent-id">{{ agentStore.agentId }}</span>
+          </div>
+          <div class="agent-work-stats" v-if="agentStatus">
+            <div class="work-stat">
+              <span class="work-stat-label">当前会话</span>
+              <span class="work-stat-value">
+                {{ agentStatus.current_sessions }}/{{ agentStatus.max_sessions }}
+              </span>
+            </div>
+            <div class="work-stat">
+              <span class="work-stat-label">今日处理</span>
+              <span class="work-stat-value">
+                {{ agentStatus.today_stats.processed_count }}
+              </span>
+            </div>
+            <div class="work-stat">
+              <span class="work-stat-label">平均响应</span>
+              <span class="work-stat-value">
+                {{ formatTime(agentStatus.today_stats.avg_response_time) }}
+              </span>
+            </div>
+            <div class="work-stat">
+              <span class="work-stat-label">平均时长</span>
+              <span class="work-stat-value">
+                {{ formatTime(agentStatus.today_stats.avg_duration) }}
+              </span>
+            </div>
+            <div class="work-stat">
+              <span class="work-stat-label">满意度</span>
+              <span class="work-stat-value">
+                {{ (agentStatus.today_stats.satisfaction_score || 0).toFixed(1) }} ⭐
+              </span>
+            </div>
+          </div>
         </div>
-        <div class="agent-details">
-          <span class="agent-name">{{ agentStore.agentName }}</span>
-          <span class="agent-id">{{ agentStore.agentId }}</span>
-        </div>
-        <!-- 管理员菜单 (v3.1.3+) -->
-        <el-dropdown v-if="agentStore.agentRole === 'admin'" trigger="click" class="admin-dropdown">
-          <button class="admin-menu-button">
+        <div class="agent-actions">
+          <!-- 管理员菜单 (v3.1.3+) -->
+          <el-dropdown v-if="agentStore.agentRole === 'admin'" trigger="click" class="admin-dropdown">
+            <button class="admin-menu-button">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/>
+                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+              </svg>
+              管理
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="router.push('/admin/agents')">
+                  <span>👥 坐席管理</span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <!-- 快捷回复按钮 (v3.7.0+) -->
+          <button @click="router.push('/quick-replies')" class="quick-reply-nav-button">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/>
-              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              <line x1="9" y1="10" x2="15" y2="10"></line>
+              <line x1="9" y1="14" x2="13" y2="14"></line>
             </svg>
-            管理
+            快捷回复
           </button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="router.push('/admin/agents')">
-                <span>👥 坐席管理</span>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-        <!-- 快捷回复按钮 (v3.7.0+) -->
-        <button @click="router.push('/quick-replies')" class="quick-reply-nav-button">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            <line x1="9" y1="10" x2="15" y2="10"></line>
-            <line x1="9" y1="14" x2="13" y2="14"></line>
-          </svg>
-          快捷回复
-        </button>
-        <!-- 消息提醒设置按钮 (v3.11.0+) -->
-        <button @click="showNotificationSettings = true" class="notification-settings-button" :class="{ 'has-unread': unreadCount > 0 }">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
-            <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-          </svg>
-          <span v-if="unreadCount > 0" class="unread-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
-          提醒设置
-        </button>
-        <button @click="handleLogout" class="logout-button">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-            <polyline points="16 17 21 12 16 7"></polyline>
-            <line x1="21" y1="12" x2="9" y2="12"></line>
-          </svg>
-          退出登录
-        </button>
+          <button @click="openTransferRequestsPanel" class="transfer-requests-button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="7" width="18" height="11" rx="2" ry="2"></rect>
+              <polyline points="8 7 8 3 16 3 16 7"></polyline>
+              <line x1="10" y1="12" x2="14" y2="12"></line>
+            </svg>
+            <span v-if="pendingTransferCount > 0" class="pending-badge">
+              {{ pendingTransferCount > 99 ? '99+' : pendingTransferCount }}
+            </span>
+            转接请求
+          </button>
+          <button @click="openAssistCenter" class="assist-center-button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"></path>
+            </svg>
+            <span v-if="assistPendingCount > 0" class="pending-badge">
+              {{ assistPendingCount > 99 ? '99+' : assistPendingCount }}
+            </span>
+            协助中心
+          </button>
+          <!-- 消息提醒设置按钮 (v3.11.0+) -->
+          <button @click="handleOpenNotificationSettings" class="notification-settings-button" :class="{ 'has-unread': unreadCount > 0 }">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+              <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+            </svg>
+            <span v-if="unreadCount > 0" class="unread-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+            提醒设置
+          </button>
+          <button @click="showPersonalizationSettings = true" class="personalization-button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-3.5L6 21l1.5-7.5L2 9h7z"/>
+            </svg>
+            个性化
+          </button>
+          <button @click="handleLogout" class="logout-button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+              <polyline points="16 17 21 12 16 7"></polyline>
+              <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+            退出登录
+          </button>
+        </div>
       </div>
     </div>
 
@@ -802,6 +1525,36 @@ onUnmounted(() => {
           <div class="detail-stat">
             <span class="detail-label">在线坐席</span>
             <span class="detail-value">{{ sessionStore.stats.active_agents }}</span>
+          </div>
+        </div>
+
+        <!-- 今日工作统计 -->
+        <div class="work-summary-card" v-if="agentStatus">
+          <div class="work-summary-header">
+            <span>📊 今日工作统计</span>
+            <button type="button" class="work-summary-refresh" @click="fetchAgentStatus">
+              刷新
+            </button>
+          </div>
+          <div class="work-summary-grid">
+            <div class="summary-item">
+              <span class="summary-label">已处理会话</span>
+              <span class="summary-value">{{ agentStatus.today_stats.processed_count }} 个</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">平均响应时间</span>
+              <span class="summary-value">{{ formatTime(agentStatus.today_stats.avg_response_time) }}</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">平均处理时长</span>
+              <span class="summary-value">{{ formatTime(agentStatus.today_stats.avg_duration) }}</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">客户满意度</span>
+              <span class="summary-value">
+                {{ (agentStatus.today_stats.satisfaction_score || 0).toFixed(1) }} ⭐
+              </span>
+            </div>
           </div>
         </div>
 
@@ -909,6 +1662,8 @@ onUnmounted(() => {
           :sessions="filteredSessions"
           :is-loading="sessionStore.isLoading"
           :selected-session="sessionStore.currentSessionName"
+          :density="sessionListDensity"
+          :show-preview="showMessagePreview"
           @select="handleSelectSession"
           @takeover="handleTakeover"
         />
@@ -920,6 +1675,23 @@ onUnmounted(() => {
           <div class="no-session-icon">💬</div>
           <p>选择一个会话开始服务</p>
           <p class="hint">点击左侧会话列表中的会话查看详情</p>
+        </div>
+        <div
+          v-else-if="manualHistoryPending === sessionStore.currentSessionName"
+          class="manual-history-placeholder"
+        >
+          <div class="placeholder-card">
+            <div class="placeholder-icon">🗂️</div>
+            <p class="placeholder-title">未加载历史消息</p>
+            <p class="placeholder-desc">当前设置为“手动加载历史消息”，点击下方按钮开始加载</p>
+            <button
+              class="primary-btn"
+              :disabled="manualHistoryLoading"
+              @click="handleManualHistoryLoad"
+            >
+              {{ manualHistoryLoading ? '加载中...' : '加载历史消息' }}
+            </button>
+          </div>
         </div>
 
         <div v-else class="session-detail">
@@ -954,6 +1726,14 @@ onUnmounted(() => {
                 @click="openTransferDialog"
               >
                 转接
+              </button>
+              <button
+                v-if="sessionStore.currentSession.status === 'manual_live'"
+                class="action-btn info"
+                @click="openAssistRequestDialog"
+                title="请求其他坐席协助"
+              >
+                请求协助
               </button>
               <button
                 v-if="sessionStore.currentSession.status === 'manual_live'"
@@ -1016,7 +1796,7 @@ onUnmounted(() => {
                 class="message-input"
                 placeholder="输入消息..."
                 rows="1"
-                @keypress="handleKeyPress"
+                @keydown="handleKeyPress"
               ></textarea>
               <button
                 class="send-btn"
@@ -1149,9 +1929,145 @@ onUnmounted(() => {
             </div>
           </div>
           <div v-else-if="currentTab === 'history'" class="history-panel">
-            <p style="padding: 20px; text-align: center; color: #718096;">
-              对话历史功能开发中...
-            </p>
+            <div v-if="loadingTransferHistory" class="history-loading">
+              <div class="spinner"></div>
+              <p>正在加载转接历史...</p>
+            </div>
+            <div v-else-if="transferHistory.length === 0" class="no-history">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#cbd5e0" stroke-width="1.5">
+                <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"></path>
+              </svg>
+              <p>暂无转接记录</p>
+              <p class="hint">转接申请及处理结果将显示在这里</p>
+            </div>
+            <div v-else class="history-list">
+              <div
+                v-for="record in transferHistory"
+                :key="record.id"
+                class="history-item"
+                :class="getTransferDecisionClass(record.decision)"
+              >
+                <div class="history-header">
+                  <span class="history-status">{{ getTransferDecisionLabel(record.decision) }}</span>
+                  <span class="history-time">{{ formatNoteTime(record.responded_at || record.transferred_at) }}</span>
+                </div>
+                <div class="history-body">
+                  <p class="history-line">
+                    <strong>发起：</strong>
+                    {{ record.from_agent_name || record.from_agent }} → {{ record.to_agent_name || record.to_agent }}
+                  </p>
+                  <p class="history-line">
+                    <strong>原因：</strong>
+                    {{ record.reason }}
+                  </p>
+                  <p v-if="record.note" class="history-line">
+                    <strong>备注：</strong>
+                    {{ record.note }}
+                  </p>
+                  <p v-if="record.response_note" class="history-line">
+                    <strong>处理说明：</strong>
+                    {{ record.response_note }}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 协助中心 -->
+    <div v-if="showAssistCenter" class="dialog-overlay">
+      <div class="dialog assist-center-dialog">
+        <div class="dialog-header">
+          <h3>协助中心</h3>
+          <button class="dialog-close" @click="closeAssistCenter">&times;</button>
+        </div>
+        <div class="assist-toolbar">
+          <div class="assist-tabs">
+            <button
+              :class="['assist-tab', { active: assistTab === 'received' }]"
+              @click="assistTab = 'received'"
+            >
+              收到的
+            </button>
+            <button
+              :class="['assist-tab', { active: assistTab === 'sent' }]"
+              @click="assistTab = 'sent'"
+            >
+              我发出的
+            </button>
+          </div>
+          <div class="assist-filter">
+            <label>状态</label>
+            <select :value="assistFilter" @change="handleAssistFilterChange(($event.target as HTMLSelectElement).value as any)">
+              <option value="pending">待处理</option>
+              <option value="answered">已回复</option>
+              <option value="all">全部</option>
+            </select>
+          </div>
+        </div>
+        <div class="assist-content">
+          <div v-if="assistLoading" class="loading-hint">
+            正在加载协助请求...
+          </div>
+          <div v-else-if="visibleAssistRequests.length === 0" class="empty-transfer-requests">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#cbd5e0" stroke-width="1.5">
+              <path d="M12 20h9"></path>
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+            </svg>
+            <p>暂无协助请求</p>
+          </div>
+          <div v-else class="assist-request-list">
+            <div
+              v-for="request in visibleAssistRequests"
+              :key="request.id"
+              class="assist-request-item"
+            >
+              <div class="assist-meta">
+                <div class="assist-line">
+                  <strong>会话：</strong>{{ request.session_name }}
+                </div>
+                <div class="assist-line">
+                  <strong>{{ assistTab === 'received' ? '来自' : '协助坐席' }}：</strong>
+                  {{ assistTab === 'received' ? request.requester : request.assistant }}
+                </div>
+                <div class="assist-line">
+                  <strong>内容：</strong>{{ request.question }}
+                </div>
+                <div class="assist-time">
+                  {{ formatNoteTime(request.created_at) }}
+                </div>
+                <div class="assist-status">
+                  {{ request.status === 'pending' ? '待处理' : '已回复' }}
+                </div>
+              </div>
+              <div v-if="assistTab === 'sent' && request.answer" class="assist-answer">
+                <strong>协助回复：</strong>
+                <p>{{ request.answer }}</p>
+              </div>
+              <div v-else-if="assistTab === 'received' && request.status === 'pending'" class="assist-reply">
+                <textarea
+                  v-model="assistResponseNotes[request.id]"
+                  class="form-textarea"
+                  rows="2"
+                  placeholder="回复协助请求..."
+                ></textarea>
+                <div class="request-actions">
+                  <button
+                    class="btn-confirm"
+                    :disabled="replyingAssistRequestId === request.id"
+                    @click="handleAssistAnswer(request.id)"
+                  >
+                    {{ replyingAssistRequestId === request.id ? '发送中...' : '发送回复' }}
+                  </button>
+                </div>
+              </div>
+              <div v-else-if="assistTab === 'received' && request.status === 'answered'" class="assist-answer">
+                <strong>我的回复：</strong>
+                <p>{{ request.answer }}</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1182,18 +2098,114 @@ onUnmounted(() => {
             </select>
           </div>
           <div class="form-group">
-            <label>转接原因（选填）</label>
-            <input
+            <label>转接类型</label>
+            <select v-model="selectedTransferReasonPreset" class="form-select">
+              <option v-for="preset in transferReasonPresets" :key="preset.id" :value="preset.id">
+                {{ preset.label }}
+              </option>
+            </select>
+            <p class="field-hint">
+              {{ selectedTransferReasonPresetInfo?.description || '选择合适的转接类型，目标坐席将看到具体原因' }}
+            </p>
+          </div>
+          <div class="form-group">
+            <label>转接原因 <span class="required">*</span></label>
+            <textarea
               v-model="transferReason"
-              type="text"
-              class="form-input"
-              placeholder="如：专业问题需转接技术支持"
-            >
+              class="form-textarea"
+              rows="3"
+              placeholder="请详细说明转接原因"
+            ></textarea>
+          </div>
+          <div class="form-group">
+            <label>转接备注（可选）</label>
+            <textarea
+              v-model="transferNote"
+              class="form-textarea"
+              rows="2"
+              placeholder="给目标坐席的补充说明，客户不可见"
+            ></textarea>
+            <p class="field-hint">补充信息仅目标坐席可见，用于说明当前处理进度或注意事项</p>
           </div>
         </div>
         <div class="dialog-footer">
           <button class="btn-cancel" @click="showTransferDialog = false">取消</button>
-          <button class="btn-confirm" @click="handleTransfer" :disabled="!transferTargetId">确认转接</button>
+          <button
+            class="btn-confirm"
+            @click="handleTransfer"
+            :disabled="!transferTargetId || !transferReason.trim() || transferSubmitting"
+          >
+            {{ transferSubmitting ? '发送中…' : '确认转接' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 待处理转接请求 -->
+    <div v-if="showTransferRequestsPanel" class="dialog-overlay">
+      <div class="dialog transfer-requests-dialog">
+        <div class="dialog-header">
+          <h3>待处理转接请求 ({{ pendingTransferCount }})</h3>
+          <button class="dialog-close" @click="closeTransferRequestsPanel">&times;</button>
+        </div>
+        <div class="dialog-body transfer-requests-body">
+          <div v-if="loadingPendingTransfers" class="loading-hint">
+            正在获取转接请求...
+          </div>
+          <div v-else-if="pendingTransferRequests.length === 0" class="empty-transfer-requests">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#cbd5e0" stroke-width="1.5">
+              <path d="M12 20h9"></path>
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+            </svg>
+            <p>暂无待处理的转接请求</p>
+          </div>
+          <div v-else class="transfer-requests-list">
+            <div
+              v-for="request in pendingTransferRequests"
+              :key="request.id"
+              class="transfer-request-item"
+            >
+              <div class="request-meta">
+                <div class="request-session">
+                  会话：<span>{{ request.session_name }}</span>
+                </div>
+                <div class="request-from">
+                  来自：<strong>{{ request.from_agent_name || request.from_agent_id }}</strong>
+                </div>
+                <div class="request-reason">
+                  原因：{{ request.reason }}
+                </div>
+                <div v-if="request.note" class="request-note">
+                  备注：{{ request.note }}
+                </div>
+                <div class="request-time">
+                  {{ formatNoteTime(request.created_at) }}
+                </div>
+              </div>
+              <textarea
+                v-model="transferResponseNotes[request.id]"
+                class="form-textarea"
+                rows="2"
+                placeholder="回复备注（可选）"
+              ></textarea>
+              <div class="request-actions">
+                <button
+                  class="btn-cancel"
+                  :disabled="respondingTransferRequestId === request.id"
+                  @click="handleTransferRequestResponse(request.id, 'decline')"
+                >
+                  {{ respondingTransferRequestId === request.id ? '处理中...' : '拒绝' }}
+                </button>
+                <button
+                  class="btn-confirm"
+                  :disabled="respondingTransferRequestId === request.id"
+                  @click="handleTransferRequestResponse(request.id, 'accept')"
+                >
+                  {{ respondingTransferRequestId === request.id ? '处理中...' : '接受' }}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1201,8 +2213,23 @@ onUnmounted(() => {
     <!-- 【模块6】快捷键帮助面板 -->
     <KeyboardShortcutsHelp v-if="showShortcutsHelp" @close="showShortcutsHelp = false" />
 
+    <!-- 【模块5】协助请求对话框 -->
+    <AssistRequestDialog
+      :visible="showAssistRequestDialog"
+      :session-name="sessionStore.currentSession?.session_name || ''"
+      :available-agents="assistRequestOptions"
+      @close="showAssistRequestDialog = false"
+      @submit="handleAssistRequest"
+    />
+
     <!-- 【模块6.2.2】消息提醒设置对话框 -->
-    <NotificationSettingsDialog v-if="showNotificationSettings" @close="showNotificationSettings = false" />
+    <NotificationSettingsDialog :visible="showNotificationSettings" @close="showNotificationSettings = false" />
+
+    <!-- 【模块6.2.4】个性化设置对话框 -->
+    <PersonalizationSettingsDialog
+      :visible="showPersonalizationSettings"
+      @close="showPersonalizationSettings = false"
+    />
   </div>
 </template>
 
@@ -1212,6 +2239,20 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   background: #f8f9fa;
+  font-size: calc(14px * var(--agent-font-scale, 1));
+}
+
+.dashboard-container.theme-dark {
+  background: #050b18;
+  color: #e2e8f0;
+}
+
+.dashboard-container.font-small {
+  font-size: 13px;
+}
+
+.dashboard-container.font-large {
+  font-size: 15px;
 }
 
 .dashboard-header {
@@ -1222,6 +2263,11 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   flex-shrink: 0;
+}
+
+.dashboard-container.theme-dark .dashboard-header {
+  background: #0f1f33;
+  border-bottom-color: #1f2f44;
 }
 
 .header-brand {
@@ -1251,51 +2297,245 @@ onUnmounted(() => {
 
 .agent-info {
   display: flex;
-  align-items: center;
-  gap: 20px;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 24px;
+  flex: 1;
 }
 
-.agent-status {
+.agent-meta {
+  display: flex;
+  align-items: stretch;
+  gap: 20px;
+  flex: 1;
+}
+
+.agent-status-card {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 260px;
+  position: relative;
+  color: white;
+}
+
+.dashboard-container.theme-dark .agent-status-card {
+  background: rgba(15, 23, 42, 0.8);
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.status-trigger {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: inherit;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  justify-content: space-between;
+  padding: 0;
+  cursor: pointer;
+  gap: 12px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .status-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
+  background: #95a5a6;
 }
 
 .status-dot.online {
-  background: #27AE60;
+  background: #27ae60;
+}
+
+.status-dot.busy {
+  background: #f2c94c;
+}
+
+.status-dot.break,
+.status-dot.lunch {
+  background: #f39c12;
+}
+
+.status-dot.training {
+  background: #2980b9;
 }
 
 .status-text {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.status-updated {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.status-note-text {
+  margin-top: 8px;
   font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  line-height: 1.4;
+}
+
+.status-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 300px;
+  background: rgba(17, 24, 39, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.35);
+  padding: 12px;
+  z-index: 10;
+  backdrop-filter: blur(12px);
+}
+
+.status-option {
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.status-option:last-child {
+  margin-bottom: 0;
+}
+
+.status-option:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.status-option.active {
+  border-color: #4ade80;
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.option-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
   color: white;
-  font-weight: 500;
+}
+
+.option-desc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 4px;
+}
+
+.status-note-editor {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.status-note-editor textarea {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: white;
+  padding: 10px;
+  font-size: 13px;
+  resize: none;
+}
+
+.status-note-editor textarea:focus {
+  outline: none;
+  border-color: #4ade80;
+}
+
+.status-save-button {
+  align-self: flex-end;
+  padding: 6px 16px;
+  border-radius: 20px;
+  border: none;
+  color: #111827;
+  background: #34d399;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.status-save-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .agent-details {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-}
-
-.agent-name {
-  font-size: 14px;
-  font-weight: 600;
+  gap: 4px;
   color: white;
 }
 
+.dashboard-container.theme-dark .agent-details {
+  color: #f8fafc;
+}
+
+.agent-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
 .agent-id {
-  font-size: 11px;
+  font-size: 12px;
   color: rgba(255, 255, 255, 0.65);
+}
+
+.agent-work-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(80px, 1fr));
+  gap: 12px;
+  color: white;
+}
+
+.dashboard-container.theme-dark .agent-work-stats {
+  color: #f8fafc;
+}
+
+.dashboard-container.theme-dark .work-stat {
+  background: rgba(30, 41, 59, 0.8);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.work-stat {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.work-stat-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.work-stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  display: block;
+}
+
+.agent-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 /* 管理员菜单按钮 (v3.1.3+) */
@@ -1325,7 +2565,8 @@ onUnmounted(() => {
 
 /* 快捷回复按钮 (v3.7.0+) */
 .quick-reply-nav-button,
-.notification-settings-button {
+.notification-settings-button,
+.transfer-requests-button {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1343,7 +2584,9 @@ onUnmounted(() => {
 }
 
 .quick-reply-nav-button:hover,
-.notification-settings-button:hover {
+.notification-settings-button:hover,
+.transfer-requests-button:hover,
+.assist-center-button:hover {
   background: rgba(255, 255, 255, 0.15);
   border-color: rgba(255, 255, 255, 0.25);
 }
@@ -1366,6 +2609,116 @@ onUnmounted(() => {
   min-width: 18px;
   text-align: center;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.pending-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: #f97316;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.assist-center-dialog {
+  width: 640px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.assist-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px 0;
+}
+
+.assist-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.assist-tab {
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+  background: #f1f5f9;
+  cursor: pointer;
+  font-size: 13px;
+  color: #475569;
+  transition: all 0.2s ease;
+}
+
+.assist-tab.active {
+  background: #2563eb;
+  color: white;
+  border-color: #2563eb;
+}
+
+.assist-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.assist-content {
+  padding: 16px 20px 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.assist-request-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.assist-request-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+
+.assist-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #1f2937;
+}
+
+.assist-time {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.assist-status {
+  font-size: 12px;
+  color: #0ea5e9;
+  font-weight: 600;
+}
+
+.assist-answer {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #0f172a;
+  background: white;
+  border-radius: 8px;
+  padding: 10px 12px;
+  border: 1px dashed #cbd5f5;
+}
+
+.assist-reply {
+  margin-top: 8px;
 }
 
 @keyframes pulse {
@@ -1395,6 +2748,42 @@ onUnmounted(() => {
 .logout-button:hover {
   background: rgba(231, 76, 60, 0.25);
   border-color: rgba(231, 76, 60, 0.4);
+}
+
+.personalization-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: rgba(147, 197, 253, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 4px;
+  font-size: 13px;
+  color: white;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.personalization-button:hover {
+  background: rgba(147, 197, 253, 0.25);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+.primary-btn {
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 10px 18px;
+  transition: opacity 0.2s ease;
+}
+
+.primary-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .dashboard-body {
@@ -1490,6 +2879,66 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 600;
   color: #2C3E50;
+}
+
+.work-summary-card {
+  margin: 0 16px 16px;
+  background: white;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+}
+
+.work-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 14px;
+  color: #111827;
+  margin-bottom: 12px;
+}
+
+.work-summary-refresh {
+  border: none;
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563EB;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.work-summary-refresh:hover {
+  background: rgba(37, 99, 235, 0.2);
+}
+
+.work-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-item {
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #E5E7EB;
+  background: #F9FAFB;
+}
+
+.summary-label {
+  font-size: 12px;
+  color: #6B7280;
+  margin-bottom: 6px;
+  display: block;
+}
+
+.summary-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
 }
 
 /* 【模块2】队列统计样式 */
@@ -1676,6 +3125,11 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.dashboard-container.theme-dark .chat-panel {
+  background: #0b1220;
+  color: #e2e8f0;
+}
+
 .no-session {
   flex: 1;
   display: flex;
@@ -1698,6 +3152,51 @@ onUnmounted(() => {
 .no-session .hint {
   font-size: 13px;
   color: #9ca3af;
+}
+
+.manual-history-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.placeholder-card {
+  background: #ffffff;
+  border: 1px dashed #cbd5f5;
+  border-radius: 16px;
+  padding: 32px;
+  text-align: center;
+  max-width: 420px;
+  box-shadow: 0 10px 30px rgba(148, 163, 184, 0.25);
+}
+
+[data-agent-theme='dark'] .placeholder-card {
+  background: rgba(15, 23, 42, 0.85);
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #e2e8f0;
+}
+
+.placeholder-icon {
+  font-size: 48px;
+  margin-bottom: 12px;
+}
+
+.placeholder-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.placeholder-desc {
+  font-size: 14px;
+  color: #6b7280;
+  margin-bottom: 16px;
+}
+
+.manual-history-placeholder .primary-btn {
+  padding: 10px 16px;
 }
 
 .session-detail {
@@ -1804,6 +3303,15 @@ onUnmounted(() => {
   background: #7F8C8D;
 }
 
+.action-btn.info {
+  background: #3498db;
+  color: white;
+}
+
+.action-btn.info:hover {
+  background: #2980b9;
+}
+
 /* 转接对话框样式 */
 .dialog-overlay {
   position: fixed;
@@ -1891,6 +3399,28 @@ onUnmounted(() => {
   border-color: #667eea;
 }
 
+.form-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 14px;
+  resize: vertical;
+  min-height: 80px;
+  transition: border-color 0.2s;
+}
+
+.form-textarea:focus {
+  border-color: #667eea;
+  outline: none;
+}
+
+.field-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
 .dialog-footer {
   padding: 16px 20px;
   border-top: 1px solid #e5e7eb;
@@ -1934,10 +3464,69 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+.transfer-requests-dialog {
+  width: 520px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.transfer-requests-body {
+  max-height: 65vh;
+  overflow-y: auto;
+}
+
+.transfer-requests-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.transfer-request-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+
+.request-meta {
+  font-size: 13px;
+  color: #1f2937;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.request-time {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.request-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.empty-transfer-requests {
+  text-align: center;
+  color: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
 .chat-history {
   flex: 1;
   overflow-y: auto;
   padding: 16px 24px;
+}
+
+.dashboard-container.theme-dark .chat-history {
+  background: #0b1220;
 }
 
 .message {
@@ -2018,6 +3607,15 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.dashboard-container.bubble-flat .message .message-content {
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.dashboard-container.bubble-rounded .message .message-content {
+  border-radius: 16px;
+}
+
 .message.user .message-content {
   background: #1f2937;
   color: white;
@@ -2035,6 +3633,17 @@ onUnmounted(() => {
   color: #1e40af;
   border-left: 3px solid #3b82f6;
   border-radius: 12px 12px 12px 4px;
+}
+
+.dashboard-container.theme-dark .message.assistant .message-content {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.dashboard-container.theme-dark .message.agent .message-content {
+  background: #162033;
+  color: #bfdbfe;
+  border-left-color: #60a5fa;
 }
 
 /* 聊天输入区域 */
@@ -2201,9 +3810,93 @@ onUnmounted(() => {
 
 .history-panel {
   height: 100%;
+  padding: 16px;
   display: flex;
+  flex-direction: column;
+}
+
+.history-loading,
+.no-history {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  color: #94a3b8;
+  text-align: center;
+  gap: 8px;
+}
+
+.history-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: white;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.history-status {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.history-time {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.history-body {
+  font-size: 13px;
+  color: #334155;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-line strong {
+  color: #1e293b;
+}
+
+.history-accepted {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.history-accepted .history-status {
+  color: #16a34a;
+}
+
+.history-declined {
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.history-declined .history-status {
+  color: #dc2626;
+}
+
+.history-expired {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.history-expired .history-status {
+  color: #d97706;
 }
 
 /* 【模块5】内部备注面板样式 */

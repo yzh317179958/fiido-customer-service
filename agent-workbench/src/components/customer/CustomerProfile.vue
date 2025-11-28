@@ -27,8 +27,11 @@ const channelNames: Record<string, string> = {
 
 // 数据脱敏
 const maskEmail = (email: string): string => {
-  const [name, domain] = email.split('@')
-  return `${name[0]}***@${domain}`
+  const [namePart = '', domainPart = ''] = email.split('@')
+  const safeName = namePart || 'user'
+  const safeDomain = domainPart || 'example.com'
+  const firstChar = safeName.charAt(0) || '*'
+  return `${firstChar}***@${safeDomain}`
 }
 
 const maskPhone = (phone: string): string => {
@@ -43,6 +46,7 @@ const maskPhone = (phone: string): string => {
 
 // 国旗 emoji
 const getFlagEmoji = (countryCode: string): string => {
+  if (!countryCode) return ''
   const codePoints = countryCode
     .toUpperCase()
     .split('')
@@ -52,6 +56,7 @@ const getFlagEmoji = (countryCode: string): string => {
 
 const maskedEmail = computed(() => props.customer ? maskEmail(props.customer.email) : '')
 const maskedPhone = computed(() => props.customer ? maskPhone(props.customer.phone) : '')
+const customerInitial = computed(() => props.customer?.name?.charAt(0)?.toUpperCase() || '客')
 </script>
 
 <template>
@@ -87,17 +92,17 @@ const maskedPhone = computed(() => props.customer ? maskPhone(props.customer.pho
           <!-- 头像与姓名 -->
           <div class="profile-avatar">
             <img
-              v-if="customer.avatar_url"
+              v-if="customer?.avatar_url"
               :src="customer.avatar_url"
-              :alt="customer.name"
+              :alt="customer?.name || '客户头像'"
               class="avatar-img"
             >
             <div v-else class="avatar-placeholder">
-              {{ customer.name[0].toUpperCase() }}
+              {{ customerInitial }}
             </div>
           </div>
 
-          <div class="profile-name">{{ customer.name }}</div>
+          <div class="profile-name">{{ customer?.name || '匿名客户' }}</div>
 
           <!-- 联系信息 -->
           <div class="info-grid">
@@ -125,8 +130,8 @@ const maskedPhone = computed(() => props.customer ? maskPhone(props.customer.pho
               </svg>
               <span class="info-label">位置</span>
               <span class="info-value">
-                <span class="country-flag">{{ getFlagEmoji(customer.country) }}</span>
-                {{ customer.city }}, {{ customer.country }}
+                <span class="country-flag">{{ getFlagEmoji(customer?.country || '') }}</span>
+                {{ customer?.city || '-' }}, {{ customer?.country || '' }}
               </span>
             </div>
 
@@ -136,7 +141,7 @@ const maskedPhone = computed(() => props.customer ? maskPhone(props.customer.pho
                 <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
               </svg>
               <span class="info-label">语言</span>
-              <span class="info-value">{{ languageNames[customer.language_preference] }}</span>
+              <span class="info-value">{{ languageNames[customer?.language_preference || ''] }}</span>
             </div>
 
             <div class="info-item">
@@ -164,32 +169,32 @@ const maskedPhone = computed(() => props.customer ? maskPhone(props.customer.pho
           <!-- 来源渠道 -->
           <div class="status-item">
             <span class="status-label">来源渠道</span>
-            <span class="status-badge channel">
-              {{ channelNames[customer.source_channel] }}
-            </span>
-          </div>
+              <span class="status-badge channel">
+                {{ channelNames[customer?.source_channel || 'other'] }}
+              </span>
+            </div>
 
           <!-- GDPR 状态 -->
           <div class="status-item">
             <span class="status-label">GDPR 同意</span>
-            <span :class="['status-badge', customer.gdpr_consent ? 'success' : 'warning']">
-              {{ customer.gdpr_consent ? '已同意' : '未同意' }}
+            <span :class="['status-badge', customer?.gdpr_consent ? 'success' : 'warning']">
+              {{ customer?.gdpr_consent ? '已同意' : '未同意' }}
             </span>
           </div>
 
           <!-- 营销订阅 -->
           <div class="status-item">
             <span class="status-label">营销订阅</span>
-            <span :class="['status-badge', customer.marketing_subscribed ? 'success' : 'default']">
-              {{ customer.marketing_subscribed ? '已订阅' : '未订阅' }}
+            <span :class="['status-badge', customer?.marketing_subscribed ? 'success' : 'default']">
+              {{ customer?.marketing_subscribed ? '已订阅' : '未订阅' }}
             </span>
           </div>
 
           <!-- VIP 状态 -->
-          <div v-if="customer.vip_status" class="status-item">
+          <div v-if="customer?.vip_status" class="status-item">
             <span class="status-label">VIP 会员</span>
             <span class="status-badge vip">
-              ⭐ {{ customer.vip_status.toUpperCase() }}
+              ⭐ {{ (customer?.vip_status || '').toUpperCase() }}
             </span>
           </div>
         </div>

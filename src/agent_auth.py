@@ -33,9 +33,12 @@ class AgentRole(str, Enum):
 
 class AgentStatus(str, Enum):
     """坐席状态"""
-    ONLINE = "online"    # 在线
-    OFFLINE = "offline"  # 离线
-    BUSY = "busy"        # 忙碌
+    ONLINE = "online"      # 在线
+    BUSY = "busy"          # 忙碌
+    BREAK = "break"        # 小休
+    LUNCH = "lunch"        # 午休
+    TRAINING = "training"  # 培训中
+    OFFLINE = "offline"    # 离线
 
 
 class Agent(BaseModel):
@@ -46,6 +49,9 @@ class Agent(BaseModel):
     name: str  # 显示名称
     role: AgentRole = AgentRole.AGENT
     status: AgentStatus = AgentStatus.OFFLINE
+    status_note: Optional[str] = Field(default=None, description="状态说明")
+    status_updated_at: float = Field(default_factory=time.time)
+    last_active_at: float = Field(default_factory=time.time)
     max_sessions: int = Field(default=5, description="最大同时服务会话数")
     created_at: float = Field(default_factory=time.time)
     last_login: Optional[float] = None
@@ -328,11 +334,19 @@ class AgentManager:
         # 更新最后登录时间
         agent.last_login = time.time()
         agent.status = AgentStatus.ONLINE
+        agent.status_note = None
+        agent.status_updated_at = time.time()
+        agent.last_active_at = time.time()
         self.update_agent(agent)
 
         return agent
 
-    def update_status(self, username: str, status: AgentStatus):
+    def update_status(
+        self,
+        username: str,
+        status: AgentStatus,
+        status_note: Optional[str] = None
+    ) -> Optional[Agent]:
         """
         更新坐席状态
 
@@ -343,7 +357,32 @@ class AgentManager:
         agent = self.get_agent_by_username(username)
         if agent:
             agent.status = status
+            if status_note is not None:
+                note = status_note.strip()
+                agent.status_note = note if note else None
+            agent.status_updated_at = time.time()
+            agent.last_active_at = time.time()
             self.update_agent(agent)
+            return agent
+        return None
+
+    def update_last_active(self, username: str) -> Optional[float]:
+        """
+        更新坐席最近活跃时间
+
+        Args:
+            username: 用户名
+
+        Returns:
+            float: 更新时间戳或 None（坐席不存在）
+        """
+        agent = self.get_agent_by_username(username)
+        if not agent:
+            return None
+
+        agent.last_active_at = time.time()
+        self.update_agent(agent)
+        return agent.last_active_at
 
     def get_all_agents(self) -> list:
         """
@@ -597,4 +636,3 @@ def validate_password(password: str) -> bool:
     has_digit = any(c.isdigit() for c in password)
 
     return has_letter and has_digit
-

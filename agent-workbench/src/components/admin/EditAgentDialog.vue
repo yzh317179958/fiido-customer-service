@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import { useAdminStore } from '@/stores/adminStore'
 import { ElMessage } from 'element-plus'
-import type { Agent, UpdateAgentRequest, AgentRole, AgentStatus } from '@/types'
+import type { Agent, UpdateAgentRequest } from '@/types'
 
 const props = defineProps<{
   modelValue: boolean
@@ -137,8 +137,11 @@ watch(() => props.agent, (newAgent) => {
       <el-form-item label="状态" prop="status">
         <el-select v-model="formData.status" style="width: 100%">
           <el-option label="在线" value="online" />
-          <el-option label="离线" value="offline" />
           <el-option label="忙碌" value="busy" />
+          <el-option label="小休" value="break" />
+          <el-option label="午休" value="lunch" />
+          <el-option label="培训" value="training" />
+          <el-option label="离线" value="offline" />
         </el-select>
       </el-form-item>
 

@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import { useAdminStore } from '@/stores/adminStore'
 import { ElMessage } from 'element-plus'
-import type { CreateAgentRequest, AgentRole } from '@/types'
+import type { CreateAgentRequest } from '@/types'
 
 const props = defineProps<{
   modelValue: boolean

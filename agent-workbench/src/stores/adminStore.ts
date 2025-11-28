@@ -9,6 +9,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import axios from 'axios'
+import { getAccessToken } from '@/utils/authStorage'
 import type {
   Agent,
   CreateAgentRequest,
@@ -30,7 +31,7 @@ export const useAdminStore = defineStore('admin', () => {
 
   // 获取 Authorization Header
   function getAuthHeader() {
-    const token = localStorage.getItem('access_token')
+    const token = getAccessToken()
     if (!token) {
       throw new Error('未登录或Token已过期')
     }

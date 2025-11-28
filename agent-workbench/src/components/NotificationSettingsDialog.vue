@@ -1,5 +1,6 @@
 <template>
   <div v-if="visible" class="dialog-overlay" @click.self="closeDialog">
+    <!-- Debug: 对话框已渲染 -->
     <div class="dialog-container">
       <div class="dialog-header">
         <h3>提醒设置</h3>
@@ -16,13 +17,37 @@
             </span>
           </div>
 
-          <button
-            v-if="notificationPermission !== 'granted'"
-            @click="handleRequestPermission"
-            class="primary-btn"
+          <div class="permission-actions">
+            <p v-if="!supportsNotification" class="permission-help">
+              ⚠️ 当前浏览器不支持 Notification API，请使用最新的 Chrome、Edge 或 Safari。
+            </p>
+            <p v-else-if="!isSecureContext" class="permission-help">
+              ⚠️ 需要在 HTTPS 或 http://localhost 环境下才能申请通知权限。
+            </p>
+            <template v-else>
+              <button
+                v-if="notificationPermission !== 'granted'"
+                @click="handleRequestPermission"
+                class="primary-btn"
+                :disabled="!canRequestPermission"
+              >
+                {{ permissionButtonText }}
+              </button>
+              <p v-else class="permission-help success">✅ 已获得通知权限</p>
+            </template>
+          </div>
+
+          <div
+            v-if="supportsNotification && isSecureContext && notificationPermission === 'denied'"
+            class="permission-help"
           >
-            {{ notificationPermission === 'denied' ? '权限已拒绝（请在浏览器设置中开启）' : '申请通知权限' }}
-          </button>
+            <p>⚠️ 通知权限已被浏览器拒绝。请按以下步骤手动开启：</p>
+            <ol>
+              <li>点击地址栏左侧的 🔒/ⓘ 图标</li>
+              <li>找到「通知」或「Notifications」设置，选择「允许」</li>
+              <li>刷新页面，再次点击上方按钮验证权限状态</li>
+            </ol>
+          </div>
         </div>
 
         <!-- 会话提醒 -->
@@ -180,7 +205,7 @@ import { ref, computed, watch } from 'vue'
 import { useNotification, type NotificationSettings } from '../composables/useNotification'
 
 // Props
-const props = defineProps<{
+const { visible } = defineProps<{
   visible: boolean
 }>()
 
@@ -197,6 +222,9 @@ const {
   updateSettings
 } = useNotification()
 
+const supportsNotification = typeof window !== 'undefined' && 'Notification' in window
+const isSecureContext = typeof window !== 'undefined' ? window.isSecureContext : true
+
 // 本地设置副本（用于编辑）
 const localSettings = ref<NotificationSettings>({ ...settings.value })
 
@@ -204,6 +232,29 @@ const localSettings = ref<NotificationSettings>({ ...settings.value })
 watch(() => settings.value, (newSettings) => {
   localSettings.value = { ...newSettings }
 }, { deep: true })
+
+// 是否可主动申请权限
+const canRequestPermission = computed(() => {
+  return supportsNotification &&
+    isSecureContext &&
+    notificationPermission.value === 'default'
+})
+
+const permissionButtonText = computed(() => {
+  if (!supportsNotification) {
+    return '浏览器不支持通知'
+  }
+  if (!isSecureContext) {
+    return '仅HTTPS/localhost可用'
+  }
+  if (notificationPermission.value === 'denied') {
+    return '❌ 权限已拒绝'
+  }
+  if (notificationPermission.value === 'granted') {
+    return '✅ 已授权'
+  }
+  return '申请通知权限'
+})
 
 // 权限状态样式
 const permissionClass = computed(() => {
@@ -231,11 +282,20 @@ const permissionText = computed(() => {
 
 // 请求通知权限
 async function handleRequestPermission() {
+  if (!supportsNotification) {
+    alert('当前浏览器不支持通知，请使用最新版本的 Chrome / Edge 等现代浏览器。')
+    return
+  }
+  if (!isSecureContext) {
+    alert('通知权限需要在 HTTPS 或 http://localhost 环境下申请，请切换到安全连接后重试。')
+    return
+  }
+
   const permission = await requestPermission()
   if (permission === 'granted') {
-    alert('通知权限已授权！')
+    alert('通知权限已授权！您将收到实时提醒。')
   } else if (permission === 'denied') {
-    alert('通知权限已拒绝。请在浏览器设置中手动开启通知权限。')
+    alert('浏览器已拒绝通知权限，请在地址栏左侧的站点设置中手动开启通知权限后重载页面。')
   }
 }
 
@@ -365,6 +425,31 @@ function closeDialog() {
 .status-default {
   background: #fef3c7;
   color: #92400e;
+}
+
+.permission-help {
+  margin-top: 16px;
+  padding: 12px;
+  background: #fef3c7;
+  border-left: 4px solid #f59e0b;
+  border-radius: 4px;
+}
+
+.permission-help p {
+  margin: 0 0 8px 0;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.permission-help ol {
+  margin: 0;
+  padding-left: 20px;
+  color: #78350f;
+}
+
+.permission-help li {
+  margin: 4px 0;
+  font-size: 14px;
 }
 
 .settings-section {

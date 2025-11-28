@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { getAccessToken } from '@/utils/authStorage'
 
 const emit = defineEmits<{
   (e: 'select', content: string): void
@@ -52,20 +53,25 @@ const quickReplies = computed<CategoryGroup[]>(() => {
 
   // 分组
   quickRepliesRaw.value.forEach(reply => {
-    if (!grouped[reply.category]) {
-      grouped[reply.category] = []
+    let bucket = grouped[reply.category]
+    if (!bucket) {
+      bucket = []
+      grouped[reply.category] = bucket
     }
-    grouped[reply.category].push(reply)
+    bucket.push(reply)
   })
 
   // 转换为数组并排序
   return categoryOrder
-    .filter(cat => grouped[cat] && grouped[cat].length > 0)
-    .map(cat => ({
-      id: cat,
-      category: categoryNames[cat] || cat,
-      items: grouped[cat]
-    }))
+    .map(cat => {
+      const items = grouped[cat] ? [...grouped[cat]] : []
+      return {
+        id: cat,
+        category: categoryNames[cat] || cat,
+        items
+      }
+    })
+    .filter(group => group.items.length > 0)
 })
 
 // 过滤后的快捷短语
@@ -89,7 +95,11 @@ const filteredReplies = computed(() => {
 const loadQuickReplies = async () => {
   try {
     isLoading.value = true
-    const token = localStorage.getItem('access_token')
+    const token = getAccessToken()
+    if (!token) {
+      console.warn('未获取到认证信息，无法加载快捷回复')
+      return
+    }
 
     const response = await fetch(`${API_BASE}/api/quick-replies?limit=100&include_shared=true`, {
       headers: {

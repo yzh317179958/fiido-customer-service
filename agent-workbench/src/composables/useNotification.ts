@@ -22,22 +22,24 @@ import { ref, computed } from 'vue'
 /**
  * 提醒类型
  */
-export enum NotificationType {
+export const NotificationTypes = {
   // 会话提醒
-  NEW_SESSION = 'new_session',           // 新会话
-  VIP_SESSION = 'vip_session',           // VIP会话
-  CUSTOMER_REPLY = 'customer_reply',     // 客户回复
-  SESSION_TIMEOUT = 'session_timeout',   // 会话超时
+  NEW_SESSION: 'new_session',
+  VIP_SESSION: 'vip_session',
+  CUSTOMER_REPLY: 'customer_reply',
+  SESSION_TIMEOUT: 'session_timeout',
 
   // 协作提醒
-  MENTION = 'mention',                   // @提醒
-  ASSIST_REQUEST = 'assist_request',     // 协助请求
-  TRANSFER_REQUEST = 'transfer_request', // 转接请求
+  MENTION: 'mention',
+  ASSIST_REQUEST: 'assist_request',
+  TRANSFER_REQUEST: 'transfer_request',
 
   // 系统提醒
-  OFFLINE = 'offline',                   // 离线提醒
-  SESSION_ASSIGNED = 'session_assigned'  // 会话分配
-}
+  OFFLINE: 'offline',
+  SESSION_ASSIGNED: 'session_assigned'
+} as const
+
+export type NotificationType = typeof NotificationTypes[keyof typeof NotificationTypes]
 
 /**
  * 提醒配置
@@ -143,12 +145,12 @@ function isInQuietMode(): boolean {
 function shouldNotify(type: NotificationType): boolean {
   // 检查提醒开关
   const typeSettingMap: { [key: string]: keyof NotificationSettings } = {
-    [NotificationType.NEW_SESSION]: 'new_session',
-    [NotificationType.VIP_SESSION]: 'vip_session',
-    [NotificationType.CUSTOMER_REPLY]: 'customer_reply',
-    [NotificationType.MENTION]: 'mention',
-    [NotificationType.ASSIST_REQUEST]: 'assist_request',
-    [NotificationType.TRANSFER_REQUEST]: 'transfer_request'
+    [NotificationTypes.NEW_SESSION]: 'new_session',
+    [NotificationTypes.VIP_SESSION]: 'vip_session',
+    [NotificationTypes.CUSTOMER_REPLY]: 'customer_reply',
+    [NotificationTypes.MENTION]: 'mention',
+    [NotificationTypes.ASSIST_REQUEST]: 'assist_request',
+    [NotificationTypes.TRANSFER_REQUEST]: 'transfer_request'
   }
 
   const settingKey = typeSettingMap[type]
@@ -177,11 +179,11 @@ function shouldPlaySound(type: NotificationType): boolean {
   }
 
   // 某些提醒类型默认不播放声音（如客户回复）
-  const soundTypes = [
-    NotificationType.NEW_SESSION,
-    NotificationType.VIP_SESSION,
-    NotificationType.SESSION_TIMEOUT,
-    NotificationType.TRANSFER_REQUEST
+  const soundTypes: NotificationType[] = [
+    NotificationTypes.NEW_SESSION,
+    NotificationTypes.VIP_SESSION,
+    NotificationTypes.SESSION_TIMEOUT,
+    NotificationTypes.TRANSFER_REQUEST
   ]
 
   return soundTypes.includes(type)
@@ -195,6 +197,12 @@ function shouldPlaySound(type: NotificationType): boolean {
 async function requestPermission(): Promise<NotificationPermission> {
   if (!('Notification' in window)) {
     console.warn('浏览器不支持通知功能')
+    return 'denied'
+  }
+
+  if (!window.isSecureContext) {
+    console.warn('通知权限申请需要在 HTTPS 或 localhost 环境下进行')
+    notificationPermission.value = 'denied'
     return 'denied'
   }
 
@@ -287,7 +295,7 @@ function playSound(type: NotificationType) {
  */
 function getSoundFile(type: NotificationType): string {
   // VIP会话使用特殊提示音
-  if (type === NotificationType.VIP_SESSION) {
+  if (type === NotificationTypes.VIP_SESSION) {
     return '/sounds/vip-notification.mp3'
   }
 
@@ -376,7 +384,7 @@ function updateSettings(newSettings: Partial<NotificationSettings>) {
  */
 function notifyNewSession(sessionName: string, customerName?: string) {
   showNotification({
-    type: NotificationType.NEW_SESSION,
+    type: NotificationTypes.NEW_SESSION,
     title: '🔔 新会话',
     body: customerName ? `客户 ${customerName} 请求人工服务` : '有新会话进入队列',
     tag: 'new_session',
@@ -389,7 +397,7 @@ function notifyNewSession(sessionName: string, customerName?: string) {
  */
 function notifyVIPSession(sessionName: string, customerName: string, issue?: string) {
   showNotification({
-    type: NotificationType.VIP_SESSION,
+    type: NotificationTypes.VIP_SESSION,
     title: '⭐ VIP客户',
     body: issue ? `VIP客户 ${customerName} 咨询${issue}` : `VIP客户 ${customerName} 请求服务`,
     tag: 'vip_session',
@@ -403,7 +411,7 @@ function notifyVIPSession(sessionName: string, customerName: string, issue?: str
  */
 function notifyCustomerReply(sessionName: string, message: string) {
   showNotification({
-    type: NotificationType.CUSTOMER_REPLY,
+    type: NotificationTypes.CUSTOMER_REPLY,
     title: '💬 客户回复',
     body: message.length > 50 ? message.substring(0, 50) + '...' : message,
     tag: `customer_reply_${sessionName}`,
@@ -417,7 +425,7 @@ function notifyCustomerReply(sessionName: string, message: string) {
  */
 function notifyAssistRequest(requester: string, question: string, requestId: string) {
   showNotification({
-    type: NotificationType.ASSIST_REQUEST,
+    type: NotificationTypes.ASSIST_REQUEST,
     title: '🤝 协助请求',
     body: `${requester} 请求协助: ${question.substring(0, 50)}${question.length > 50 ? '...' : ''}`,
     tag: 'assist_request',
@@ -430,7 +438,7 @@ function notifyAssistRequest(requester: string, question: string, requestId: str
  */
 function notifyTransferRequest(fromAgent: string, sessionName: string, reason?: string) {
   showNotification({
-    type: NotificationType.TRANSFER_REQUEST,
+    type: NotificationTypes.TRANSFER_REQUEST,
     title: '🔀 转接请求',
     body: reason ? `${fromAgent} 转接会话: ${reason}` : `${fromAgent} 转接会话给你`,
     tag: 'transfer_request',
@@ -443,7 +451,7 @@ function notifyTransferRequest(fromAgent: string, sessionName: string, reason?: 
  */
 function notifyMention(fromAgent: string, sessionName: string, content: string) {
   showNotification({
-    type: NotificationType.MENTION,
+    type: NotificationTypes.MENTION,
     title: '@ 有人提到你',
     body: `${fromAgent} 在会话中@了你: ${content.substring(0, 50)}${content.length > 50 ? '...' : ''}`,
     tag: 'mention',

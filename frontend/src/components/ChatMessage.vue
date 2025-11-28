@@ -92,27 +92,30 @@ const senderName = computed(() => {
 </template>
 
 <style scoped>
-/* Coze-inspired Message Styles */
+/* Premium Message Styles */
 .system-message {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 8px 0;
-  margin: 12px 0;
+  margin: 16px 0;
 }
 
 .system-divider {
   flex: 1;
   height: 1px;
-  background: #e5e7eb;
+  background: linear-gradient(90deg, transparent, #e5e7eb, transparent);
 }
 
 .system-text {
   color: #9ca3af;
   font-size: 12px;
   white-space: nowrap;
-  font-weight: 400;
+  font-weight: 500;
+  padding: 4px 12px;
+  background: #f9fafb;
+  border-radius: 12px;
 }
 
 /* Message base styles */
@@ -120,7 +123,7 @@ const senderName = computed(() => {
   margin-bottom: 16px;
   display: flex;
   gap: 10px;
-  animation: messageSlideIn 0.2s ease-out;
+  animation: messageSlideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @keyframes messageSlideIn {
@@ -142,7 +145,7 @@ const senderName = computed(() => {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: #e5e7eb;
+  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -151,6 +154,13 @@ const senderName = computed(() => {
   font-size: 12px;
   flex-shrink: 0;
   overflow: hidden;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  transition: all 0.2s ease;
+}
+
+.message-avatar:hover {
+  transform: scale(1.05);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
 }
 
 .message-avatar img {
@@ -160,15 +170,17 @@ const senderName = computed(() => {
 }
 
 .message.user .message-avatar {
-  background: #3b82f6;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
   color: white;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
 }
 
 /* Agent avatar */
 .message-avatar.agent-avatar {
-  background: #10b981;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   color: white;
   font-size: 16px;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
 }
 
 .message-body {
@@ -204,12 +216,13 @@ const senderName = computed(() => {
 }
 
 .agent-badge {
-  background: #10b981;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
   color: white;
-  padding: 2px 6px;
-  border-radius: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
   font-size: 10px;
   font-weight: 600;
+  box-shadow: 0 1px 3px rgba(16, 185, 129, 0.3);
 }
 
 .message-time {
@@ -220,28 +233,43 @@ const senderName = computed(() => {
 
 .message-content {
   padding: 10px 14px;
-  border-radius: 12px;
+  border-radius: 14px;
   word-wrap: break-word;
   line-height: 1.5;
   font-size: 14px;
+  position: relative;
 }
 
 .message.user .message-content {
-  background: #3b82f6;
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
   color: #ffffff;
   border-bottom-right-radius: 4px;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25), 0 1px 3px rgba(59, 130, 246, 0.15);
+}
+
+.message.user .message-content::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 100%);
+  border-radius: inherit;
+  pointer-events: none;
 }
 
 .message.bot .message-content {
-  background: #f3f4f6;
+  background: linear-gradient(to bottom, #f9fafb 0%, #f3f4f6 100%);
   color: #111827;
   border-bottom-left-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  border: 1px solid #e5e7eb;
 }
 
 .message.agent .message-content {
-  background: #d1fae5;
+  background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
   color: #065f46;
   border-bottom-left-radius: 4px;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2), 0 1px 3px rgba(16, 185, 129, 0.1);
+  border: 1px solid #a7f3d0;
 }
 
 /* Markdown styles */
@@ -299,9 +327,9 @@ const senderName = computed(() => {
 }
 
 .message-content :deep(code) {
-  background: rgba(0, 0, 0, 0.05);
-  padding: 2px 5px;
-  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
   font-size: 0.9em;
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
 }
