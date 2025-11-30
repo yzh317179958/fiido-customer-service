@@ -53,7 +53,7 @@ from src.email_service import get_email_service, send_escalation_email
 from src.agent_auth import (
     AgentManager,
     AgentTokenManager,
-    initialize_default_agents,
+    initialize_super_admin,
     LoginRequest,
     LoginResponse,
     agent_to_dict,
@@ -444,13 +444,17 @@ async def lifespan(app: FastAPI):
         # 初始化坐席账号管理器
         agent_manager = AgentManager(session_store)
 
-        # 初始化默认坐席账号
+        # 初始化超级管理员账号（系统根账号）
         print(f"🔐 初始化坐席认证系统...")
-        initialize_default_agents(agent_manager)
+        admin_username = os.getenv("SUPER_ADMIN_USERNAME", "admin")
+        admin_password = os.getenv("SUPER_ADMIN_PASSWORD", "admin123")
+        initialize_super_admin(agent_manager, admin_username, admin_password)
 
         print(f"✅ 坐席认证系统初始化成功")
         print(f"   Token过期时间: 60分钟")
         print(f"   刷新Token过期: 7天")
+        print(f"   超级管理员: {admin_username}")
+        print(f"   ⚠️  其他坐席账号请通过管理员在系统内创建")
 
     except Exception as e:
         print(f"⚠️  坐席认证系统初始化失败: {str(e)}")

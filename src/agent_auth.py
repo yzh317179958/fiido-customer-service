@@ -429,51 +429,49 @@ class AgentManager:
 
 
 # ====================
-# 初始化默认坐席账号
+# 初始化超级管理员账号
 # ====================
 
-def initialize_default_agents(agent_manager: AgentManager):
+def initialize_super_admin(
+    agent_manager: AgentManager,
+    admin_username: str = "admin",
+    admin_password: str = "admin123"
+):
     """
-    初始化默认坐席账号（用于测试）
+    初始化固定的超级管理员账号（系统根账号）
+
+    该账号是系统唯一的预设管理员，用于：
+    1. 首次登录系统
+    2. 创建其他坐席账号
+    3. 管理所有用户权限
+
+    其他所有账号都必须通过该管理员在系统内创建。
 
     Args:
         agent_manager: 坐席管理器
+        admin_username: 管理员用户名（默认 "admin"）
+        admin_password: 管理员密码（默认 "admin123"，生产环境请从环境变量读取）
     """
-    # 检查是否已存在默认账号
-    if agent_manager.get_agent_by_username("admin"):
-        print("  ⏭️  默认坐席账号已存在，跳过初始化")
-        return
+    # 检查超级管理员是否已存在
+    existing_admin = agent_manager.get_agent_by_username(admin_username)
+    if existing_admin:
+        print(f"  ⏭️  超级管理员账号 '{admin_username}' 已存在，跳过初始化")
+        return existing_admin
 
-    # 创建管理员账号
+    # 创建超级管理员账号
     admin = agent_manager.create_agent(
-        username="admin",
-        password="admin123",  # 生产环境请修改！
+        username=admin_username,
+        password=admin_password,
         name="系统管理员",
         role=AgentRole.ADMIN,
-        max_sessions=10
+        max_sessions=20  # 管理员可同时管理更多会话
     )
-    print(f"  ✅ 创建管理员账号: {admin.username} (密码: admin123)")
 
-    # 创建普通坐席账号
-    agent1 = agent_manager.create_agent(
-        username="agent001",
-        password="agent123",  # 生产环境请修改！
-        name="客服小王",
-        role=AgentRole.AGENT,
-        max_sessions=5
-    )
-    print(f"  ✅ 创建坐席账号: {agent1.username} (密码: agent123)")
+    print(f"  ✅ 创建超级管理员账号: {admin.username}")
+    print(f"  ⚠️  请在首次登录后立即修改密码！")
 
-    agent2 = agent_manager.create_agent(
-        username="agent002",
-        password="agent123",
-        name="客服小李",
-        role=AgentRole.AGENT,
-        max_sessions=5
-    )
-    print(f"  ✅ 创建坐席账号: {agent2.username} (密码: agent123)")
+    return admin
 
-    print("  🎉 默认坐席账号初始化完成！")
 
 
 # ====================
