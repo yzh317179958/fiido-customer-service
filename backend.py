@@ -20,18 +20,22 @@ from contextlib import asynccontextmanager
 import uuid
 import hashlib
 from datetime import datetime, timezone
+import csv
+import io
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from typing import Dict, Any, List, Literal
 
 from cozepy import Coze, TokenAuth, JWTAuth, JWTOAuthApp
 import httpx
+
+MAX_TICKET_EXPORT_ROWS = 10000
 
 # 导入 OAuth Token 管理器
 from src.oauth_token_manager import OAuthTokenManager
@@ -42,6 +46,7 @@ from src.session_state import (
     SessionStatus,
     InMemorySessionStore,
     Message,
+    MessageRole,
     EscalationInfo
 )
 from src.redis_session_store import RedisSessionStore  # Redis 存储实现
@@ -58,13 +63,24 @@ from src.agent_auth import (
     LoginResponse,
     agent_to_dict,
     Agent,
-    AgentStatus
+    AgentStatus,
+    UpdateAgentSkillsRequest
 )
 
 # 【模块3】导入快捷回复系统模块
 from src.quick_reply import QuickReply, QuickReplyCategory, QUICK_REPLY_CATEGORIES, SUPPORTED_VARIABLES
 from src.quick_reply_store import QuickReplyStore
 from src.variable_replacer import VariableReplacer, build_variable_context
+from src.ticket import (
+    Ticket,
+    TicketPriority,
+    TicketStatus,
+    TicketType,
+    TicketCustomerInfo,
+    TicketCommentType,
+)
+from src.ticket_store import TicketStore
+from src.ticket_assignment import SmartAssignmentEngine
 
 # 【模块5】导入协助请求模块
 from src.assist_request import (
@@ -77,6 +93,34 @@ from src.assist_request import (
 
 # 加载环境变量
 load_dotenv()
+
+# ====================
+# 网络代理防护（禁用未受支持的 SOCKS 代理）
+# ====================
+PROXY_ENV_VARS = [
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+]
+
+
+def _clear_proxy_env():
+    """禁用影响 httpx/requests 的环境代理，避免 SOCKS 协议报错"""
+    cleared = []
+    for var in PROXY_ENV_VARS:
+        value = os.environ.pop(var, None)
+        if value:
+            cleared.append((var, value))
+
+    if cleared:
+        removed = ", ".join(var for var, _ in cleared)
+        print(f"⚠️  检测到代理变量，已忽略: {removed}")
+
+
+_clear_proxy_env()
 
 # 配置 HTTP 客户端超时
 HTTP_TIMEOUT = httpx.Timeout(
@@ -119,6 +163,176 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
+class CreateTicketRequest(BaseModel):
+    """创建工单请求"""
+    session_name: Optional[str] = None
+    title: str = Field(..., max_length=200)
+    description: str = Field(..., max_length=5000)
+    ticket_type: TicketType = TicketType.AFTER_SALE
+    priority: TicketPriority = TicketPriority.MEDIUM
+    customer: Optional[TicketCustomerInfo] = None
+    assigned_agent_id: Optional[str] = None
+    assigned_agent_name: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class UpdateTicketRequest(BaseModel):
+    """更新工单请求"""
+    status: Optional[TicketStatus] = None
+    priority: Optional[TicketPriority] = None
+    assigned_agent_id: Optional[str] = None
+    assigned_agent_name: Optional[str] = None
+    note: Optional[str] = Field(default=None, max_length=500)
+    metadata_updates: Optional[Dict[str, Any]] = None
+    change_reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class SessionTicketRequest(BaseModel):
+    """从会话创建工单的可选参数"""
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=5000)
+    ticket_type: TicketType = TicketType.AFTER_SALE
+    priority: TicketPriority = TicketPriority.MEDIUM
+
+
+class ManualTicketRequest(BaseModel):
+    """手动创建工单请求"""
+    title: str = Field(..., max_length=200)
+    description: str = Field(..., max_length=5000)
+    ticket_type: TicketType = TicketType.AFTER_SALE
+    priority: TicketPriority = TicketPriority.MEDIUM
+    customer: TicketCustomerInfo
+    assigned_agent_id: Optional[str] = None
+    assigned_agent_name: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class AssignTicketRequest(BaseModel):
+    agent_id: str = Field(..., max_length=100)
+    agent_name: Optional[str] = Field(default=None, max_length=100)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class TicketCommentRequest(BaseModel):
+    content: str = Field(..., max_length=2000)
+    comment_type: TicketCommentType = TicketCommentType.INTERNAL
+    notify_agent_id: Optional[str] = Field(default=None, max_length=100)
+
+
+class ReopenTicketRequest(BaseModel):
+    reason: str = Field(..., max_length=200)
+    comment: Optional[str] = Field(default=None, max_length=500)
+
+
+class ArchiveTicketRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class AutoArchiveRequest(BaseModel):
+    older_than_days: Optional[int] = Field(default=30, ge=1, le=365)
+
+
+class TicketFilters(BaseModel):
+    """工单高级筛选"""
+    statuses: Optional[List[TicketStatus]] = Field(default=None, description="筛选状态列表")
+    priorities: Optional[List[TicketPriority]] = Field(default=None, description="筛选优先级")
+    ticket_types: Optional[List[TicketType]] = Field(default=None, description="工单类型")
+    assigned: Optional[str] = Field(
+        default=None,
+        description="指派筛选: mine / unassigned / 指定坐席ID"
+    )
+    assigned_agent_ids: Optional[List[str]] = Field(default=None, description="指定坐席ID列表")
+    keyword: Optional[str] = Field(default=None, max_length=200, description="关键字搜索")
+    tags: Optional[List[str]] = Field(default=None, description="标签匹配 (metadata.tags)")
+    categories: Optional[List[str]] = Field(default=None, description="问题分类，匹配 metadata.category/categories")
+    created_start: Optional[float] = Field(default=None, ge=0, description="创建起始时间(Unix秒)")
+    created_end: Optional[float] = Field(default=None, ge=0, description="创建结束时间(Unix秒)")
+    updated_start: Optional[float] = Field(default=None, ge=0, description="更新起始时间(Unix秒)")
+    updated_end: Optional[float] = Field(default=None, ge=0, description="更新时间止(Unix秒)")
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+    sort_by: Optional[str] = Field(default="updated_at")
+    sort_desc: bool = Field(default=True)
+
+
+class TicketExportRequest(BaseModel):
+    format: Literal['csv', 'xlsx', 'pdf'] = 'csv'
+    filters: Optional[TicketFilters] = None
+
+
+class SmartAssignRequest(BaseModel):
+    """智能分配推荐请求"""
+    ticket_type: TicketType = TicketType.AFTER_SALE
+    priority: TicketPriority = TicketPriority.MEDIUM
+    customer_email: Optional[str] = None
+    customer_country: Optional[str] = None
+    category: Optional[str] = None
+    keywords: List[str] = Field(default_factory=list, description="关键字列表")
+    tags: List[str] = Field(default_factory=list, description="标签列表")
+
+
+class BatchAssignRequest(BaseModel):
+    """批量分配请求"""
+    ticket_ids: List[str]
+    target_agent_id: str = Field(..., max_length=100)
+    target_agent_name: Optional[str] = Field(default=None, max_length=100)
+    note: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("ticket_ids")
+    @classmethod
+    def validate_ticket_ids(cls, value: List[str]) -> List[str]:
+        cleaned = []
+        for ticket_id in value:
+            if ticket_id and ticket_id.strip():
+                cleaned.append(ticket_id.strip())
+        unique = list(dict.fromkeys(cleaned))
+        if not unique:
+            raise ValueError("ticket_ids 不能为空")
+        if len(unique) > 50:
+            raise ValueError("一次最多分配50个工单")
+        return unique
+
+
+class BatchCloseRequest(BaseModel):
+    ticket_ids: List[str]
+    close_reason: Optional[str] = Field(default=None, max_length=200)
+    comment: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("ticket_ids")
+    @classmethod
+    def validate_ticket_ids(cls, value: List[str]) -> List[str]:
+        cleaned = []
+        for ticket_id in value:
+            if ticket_id and ticket_id.strip():
+                cleaned.append(ticket_id.strip())
+        unique = list(dict.fromkeys(cleaned))
+        if not unique:
+            raise ValueError("ticket_ids 不能为空")
+        if len(unique) > 50:
+            raise ValueError("一次最多操作50个工单")
+        return unique
+
+
+class BatchPriorityRequest(BaseModel):
+    ticket_ids: List[str]
+    priority: TicketPriority
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+    @field_validator("ticket_ids")
+    @classmethod
+    def validate_ticket_ids(cls, value: List[str]) -> List[str]:
+        cleaned = []
+        for ticket_id in value:
+            if ticket_id and ticket_id.strip():
+                cleaned.append(ticket_id.strip())
+        unique = list(dict.fromkeys(cleaned))
+        if not unique:
+            raise ValueError("ticket_ids 不能为空")
+        if len(unique) > 50:
+            raise ValueError("一次最多操作50个工单")
+        return unique
+
+
 class UpdateAgentStatusRequest(BaseModel):
     """坐席状态更新请求"""
     status: AgentStatus
@@ -139,6 +353,8 @@ agent_manager: Optional[AgentManager] = None  # 坐席账号管理器
 agent_token_manager: Optional[AgentTokenManager] = None  # 坐席 JWT Token 管理器
 quick_reply_store: Optional['QuickReplyStore'] = None  # 快捷回复存储管理器（模块3）
 variable_replacer: Optional['VariableReplacer'] = None  # 变量替换器（模块3）
+ticket_store: Optional['TicketStore'] = None  # 工单系统存储（L1-2）
+smart_assignment_engine: Optional['SmartAssignmentEngine'] = None  # 智能分配引擎
 WORKFLOW_ID: str = ""
 APP_ID: str = ""  # AI 应用 ID（应用中嵌入对话流时必需）
 AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
@@ -147,6 +363,78 @@ AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
 # 实现原理: 首次不传 conversation_id,Coze 会自动生成并返回
 # 后续对话必须传入相同的 conversation_id 以保持上下文
 conversation_cache: dict = {}  # {session_name: conversation_id}
+
+
+def _format_timestamp(ts: Optional[float]) -> str:
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(ts, timezone.utc)
+        return dt.isoformat()
+    except Exception:
+        return str(ts)
+
+
+def _tickets_to_csv_bytes(tickets: List['Ticket']) -> bytes:
+    headers = [
+        "ticket_id",
+        "title",
+        "status",
+        "priority",
+        "ticket_type",
+        "customer_name",
+        "customer_email",
+        "customer_phone",
+        "assigned_agent_name",
+        "assigned_agent_id",
+        "session_name",
+        "created_at",
+        "updated_at",
+        "first_response_at",
+        "resolved_at",
+        "closed_at",
+        "reopened_count",
+        "description",
+        "tags",
+        "metadata"
+    ]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    for ticket in tickets:
+        data = ticket.to_dict()
+        customer = data.get("customer") or {}
+        metadata = data.get("metadata") or {}
+        tags = metadata.get("tags")
+        if isinstance(tags, list):
+            tags_value = ", ".join(str(tag) for tag in tags)
+        elif isinstance(tags, str):
+            tags_value = tags
+        else:
+            tags_value = ""
+        writer.writerow([
+            ticket.ticket_id,
+            ticket.title,
+            ticket.status.value if isinstance(ticket.status, TicketStatus) else ticket.status,
+            ticket.priority.value if isinstance(ticket.priority, TicketPriority) else ticket.priority,
+            ticket.ticket_type.value if isinstance(ticket.ticket_type, TicketType) else ticket.ticket_type,
+            customer.get("name") or "",
+            customer.get("email") or "",
+            customer.get("phone") or "",
+            ticket.assigned_agent_name or "",
+            ticket.assigned_agent_id or "",
+            ticket.session_name or "",
+            _format_timestamp(ticket.created_at),
+            _format_timestamp(ticket.updated_at),
+            _format_timestamp(ticket.first_response_at),
+            _format_timestamp(ticket.resolved_at),
+            _format_timestamp(ticket.closed_at),
+            ticket.reopened_count,
+            ticket.description,
+            tags_value,
+            json.dumps(metadata, ensure_ascii=False)
+        ])
+    return output.getvalue().encode("utf-8-sig")
 
 # P0-5: SSE 消息队列 - 用于人工消息推送
 # 结构: {session_name: asyncio.Queue()}
@@ -312,7 +600,7 @@ def _auto_adjust_agent_status(agent_obj: Agent) -> Agent:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, quick_reply_store, variable_replacer, WORKFLOW_ID, APP_ID, AUTH_MODE
+    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, quick_reply_store, variable_replacer, ticket_store, smart_assignment_engine, WORKFLOW_ID, APP_ID, AUTH_MODE
 
     # 读取配置
     WORKFLOW_ID = os.getenv("COZE_WORKFLOW_ID", "")
@@ -477,6 +765,33 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  快捷回复系统初始化失败: {str(e)}")
         quick_reply_store = None
         variable_replacer = VariableReplacer()
+
+    # 【L1-2】初始化工单系统（MVP）
+    try:
+        if USE_REDIS and hasattr(session_store, 'redis'):
+            ticket_store = TicketStore(session_store.redis)
+            print("✅ 工单系统初始化成功 (Redis)")
+        else:
+            ticket_store = TicketStore()
+            print("⚠️  工单系统使用内存存储，仅适用于开发环境")
+    except Exception as e:
+        ticket_store = TicketStore()
+        print(f"⚠️  工单系统初始化失败，回退到内存存储: {str(e)}")
+
+    # 智能分配引擎
+    try:
+        if agent_manager and session_store:
+            smart_assignment_engine = SmartAssignmentEngine(
+                agent_manager=agent_manager,
+                session_store=session_store
+            )
+            print("✅ 智能分配引擎初始化成功")
+        else:
+            smart_assignment_engine = None
+            print("⚠️ 智能分配引擎未启用（缺少依赖）")
+    except Exception as e:
+        smart_assignment_engine = None
+        print(f"⚠️ 智能分配引擎初始化失败: {str(e)}")
 
     print(f"{'=' * 60}\n")
 
@@ -1615,6 +1930,14 @@ async def manual_escalate(request: dict):
             new_status=SessionStatus.PENDING_MANUAL
         )
 
+        # 智能分配坐席
+        auto_assignment = None
+        if smart_assignment_engine and not session_state.assigned_agent:
+            auto_assignment = await smart_assignment_engine.assign_session(session_state)
+            if auto_assignment:
+                session_state.assigned_agent = auto_assignment.agent
+                print(f"🤖 智能分配坐席: {auto_assignment.agent.name} ({auto_assignment.agent.id})")
+
         # 保存会话状态
         await session_store.save(session_state)
 
@@ -1641,7 +1964,15 @@ async def manual_escalate(request: dict):
             "success": True,
             "data": session_state.model_dump(),
             "email_sent": email_sent,
-            "is_in_shift": is_in_shift()
+            "is_in_shift": is_in_shift(),
+            "auto_assigned": bool(auto_assignment),
+            "recommendation": {
+                "agent_id": auto_assignment.agent.id if auto_assignment else None,
+                "agent_name": auto_assignment.agent.name if auto_assignment else None,
+                "matched_tags": auto_assignment.matched_tags if auto_assignment else [],
+                "manual_sessions": auto_assignment.manual_sessions if auto_assignment else 0,
+                "pending_sessions": auto_assignment.pending_sessions if auto_assignment else 0,
+            } if auto_assignment else None
         }
 
     except HTTPException:
@@ -2326,6 +2657,13 @@ async def takeover_session(
                     detail=f"INVALID_STATUS: 当前状态为{session_state.status}，无法接入"
                 )
 
+        # 如果已经由智能分配锁定坐席，禁止其他坐席抢单
+        if session_state.assigned_agent and session_state.assigned_agent.id != agent_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"ASSIGNED_TO_OTHER: 会话已分配给坐席【{session_state.assigned_agent.name}】"
+            )
+
         # 🔴 P0-2.3: 分配坐席
         from src.session_state import AgentInfo
         session_state.assigned_agent = AgentInfo(
@@ -2396,6 +2734,9 @@ async def takeover_session(
 
         if agent_manager:
             agent_manager.update_last_active(agent_id)
+
+        if smart_assignment_engine:
+            smart_assignment_engine.remember_assignment(session_state, agent_id)
 
         return {
             "success": True,
@@ -2526,7 +2867,8 @@ async def get_sessions(
     keyword: Optional[str] = None,       # 搜索关键词
     sort: Optional[str] = "default",     # "default" / "newest" / "oldest" / "vip" / "waitTime"
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
+    current_agent: Dict[str, Any] = Depends(require_agent)
 ):
     """
     获取会话列表 (增强版 - 支持高级筛选和搜索)
@@ -2571,18 +2913,29 @@ async def get_sessions(
         if time_end:
             sessions = [s for s in sessions if s.created_at <= time_end]
 
+        current_agent_id = current_agent.get("agent_id")
+
         # 🔴 L1-1-Part1-F1-3: 坐席筛选
         if agent and agent != 'all':
             if agent == 'unassigned':
                 # 显示 pending_manual 状态的会话
                 sessions = [s for s in sessions if s.status == SessionStatus.PENDING_MANUAL]
             elif agent == 'mine':
-                # TODO: 需要从JWT token中获取当前坐席ID
-                # 暂时跳过，需要权限中间件支持
-                pass
+                if not current_agent_id:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="无法识别当前坐席，token 可能已失效"
+                    )
+                sessions = [
+                    s for s in sessions
+                    if s.assigned_agent and s.assigned_agent.id == current_agent_id
+                ]
             else:
                 # 指定坐席
-                sessions = [s for s in sessions if s.assigned_agent and s.assigned_agent.get('id') == agent]
+                sessions = [
+                    s for s in sessions
+                    if s.assigned_agent and s.assigned_agent.id == agent
+                ]
 
         # 🔴 L1-1-Part1-F1-4: 客户类型筛选
         if customer_type and customer_type != 'all':
@@ -2688,6 +3041,801 @@ async def get_sessions(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+# ====================
+# 工单系统 API (L1-2 MVP)
+# ====================
+
+
+@app.post("/api/tickets")
+async def create_ticket_endpoint(
+    request: CreateTicketRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """创建新工单（最小可行版本）"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        created_by = agent.get("agent_id") or agent.get("username") or "system"
+        ticket = ticket_store.create_from_payload(
+            title=request.title.strip(),
+            description=request.description.strip(),
+            created_by=created_by,
+            created_by_name=agent.get("username"),
+            session_name=request.session_name,
+            ticket_type=request.ticket_type,
+            priority=request.priority,
+            customer=request.customer.dict() if request.customer else None,
+            assigned_agent_id=request.assigned_agent_id,
+            assigned_agent_name=request.assigned_agent_name,
+            metadata=request.metadata
+        )
+
+        return {
+            "success": True,
+            "data": ticket.to_dict()
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"❌ 创建工单失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="创建工单失败")
+
+
+@app.post("/api/tickets/manual")
+async def create_manual_ticket_endpoint(
+    request: ManualTicketRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """手动创建工单（无需关联会话）"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        created_by = agent.get("agent_id") or agent.get("username") or "system"
+        ticket = ticket_store.create_from_payload(
+            title=request.title.strip(),
+            description=request.description.strip(),
+            created_by=created_by,
+            created_by_name=agent.get("username"),
+            session_name=None,
+            ticket_type=request.ticket_type,
+            priority=request.priority,
+            customer=request.customer.dict(),
+            assigned_agent_id=request.assigned_agent_id,
+            assigned_agent_name=request.assigned_agent_name,
+            metadata=request.metadata
+        )
+
+        return {
+            "success": True,
+            "data": ticket.to_dict()
+        }
+    except Exception as e:
+        print(f"❌ 手动创建工单失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="创建工单失败")
+
+
+@app.get("/api/tickets")
+async def list_tickets_endpoint(
+    status: Optional[TicketStatus] = None,
+    priority: Optional[TicketPriority] = None,
+    assigned_agent_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """查询工单列表"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    try:
+        total, tickets = ticket_store.list(
+            status=status,
+            priority=priority,
+            assigned_agent_id=assigned_agent_id,
+            limit=limit,
+            offset=offset
+        )
+        return {
+            "success": True,
+            "data": {
+                "tickets": [ticket.to_dict() for ticket in tickets],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + len(tickets)) < total
+            }
+        }
+    except Exception as e:
+        print(f"❌ 查询工单失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="查询工单失败")
+
+
+@app.get("/api/tickets/search")
+async def search_tickets_endpoint(
+    query: str,
+    limit: int = 50,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """关键词搜索工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    keyword = (query or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="缺少查询关键词")
+
+    limit = max(1, min(limit, 200))
+
+    try:
+        total, tickets = ticket_store.search(keyword, limit=limit)
+        return {
+            "success": True,
+            "data": {
+                "tickets": [ticket.to_dict() for ticket in tickets],
+                "total": total,
+                "limit": limit,
+                "has_more": total > len(tickets)
+            }
+        }
+    except Exception as e:
+        print(f"❌ 搜索工单失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="搜索工单失败")
+
+
+@app.post("/api/tickets/filter")
+async def filter_tickets_endpoint(
+    filters: TicketFilters,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """高级筛选工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    allowed_sort_fields = {
+        "updated_at",
+        "created_at",
+        "priority",
+        "status",
+        "resolved_at",
+        "first_response_at",
+        "reopened_at"
+    }
+    sort_by = (filters.sort_by or "updated_at")
+    if sort_by not in allowed_sort_fields:
+        raise HTTPException(status_code=400, detail=f"INVALID_SORT_FIELD: {sort_by}")
+
+    try:
+        total, tickets = ticket_store.filter_tickets(
+            statuses=filters.statuses,
+            priorities=filters.priorities,
+            ticket_types=filters.ticket_types,
+            assigned=filters.assigned,
+            assigned_agent_ids=filters.assigned_agent_ids,
+            keyword=filters.keyword,
+            tags=filters.tags,
+            categories=filters.categories,
+            created_start=filters.created_start,
+            created_end=filters.created_end,
+            updated_start=filters.updated_start,
+            updated_end=filters.updated_end,
+            limit=filters.limit,
+            offset=filters.offset,
+            sort_by=sort_by,
+            sort_desc=filters.sort_desc,
+            current_agent_id=agent.get("agent_id") or agent.get("username")
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "success": True,
+        "data": {
+            "tickets": [ticket.to_dict() for ticket in tickets],
+            "total": total,
+            "limit": filters.limit,
+            "offset": filters.offset,
+        "has_more": (filters.offset + len(tickets)) < total
+    }
+}
+
+
+@app.post("/api/tickets/assign/recommend")
+async def recommend_ticket_assignment(
+    request: SmartAssignRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """获取智能分配推荐"""
+    if not smart_assignment_engine or not session_store:
+        raise HTTPException(status_code=503, detail="智能分配功能未启用")
+
+    simulated = SessionState(
+        session_name=f"ticket_rec_{uuid.uuid4().hex}",
+        status=SessionStatus.PENDING_MANUAL
+    )
+    profile = simulated.user_profile
+    if request.customer_email:
+        profile.email = request.customer_email.strip()
+    if request.customer_country:
+        profile.country = request.customer_country.strip()
+
+    metadata = profile.metadata
+    if request.category:
+        metadata["category"] = request.category
+    if request.tags:
+        metadata["tags"] = request.tags
+
+    if request.keywords:
+        simulated.priority.urgent_keywords = request.keywords[:5]
+
+    decision = await smart_assignment_engine.assign_session(simulated, remember_choice=False)
+
+    if not decision:
+        return {
+            "success": False,
+            "message": "暂无可用坐席，请稍后重试"
+        }
+
+    reason_parts = []
+    if decision.matched_tags:
+        reason_parts.append(f"技能匹配：{', '.join(decision.matched_tags[:3])}")
+    reason_parts.append(
+        f"当前人工会话 {decision.manual_sessions} 个，待接入 {decision.pending_sessions} 个"
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "agent_id": decision.agent.id,
+            "agent_name": decision.agent.name,
+            "matched_tags": decision.matched_tags,
+            "manual_sessions": decision.manual_sessions,
+            "pending_sessions": decision.pending_sessions,
+            "load_score": decision.load_score,
+            "reason": "；".join(reason_parts)
+        }
+    }
+
+
+@app.post("/api/tickets/export")
+async def export_tickets_endpoint(
+    request: TicketExportRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """导出工单列表，当前支持 CSV 格式"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    export_format = request.format.lower()
+    if export_format != 'csv':
+        raise HTTPException(status_code=400, detail="暂未支持该导出格式")
+
+    filters_payload = request.filters or TicketFilters()
+    provided_fields = request.filters.model_fields_set if request.filters else set()
+    allowed_sort_fields = {
+        "updated_at",
+        "created_at",
+        "priority",
+        "status",
+        "resolved_at",
+        "first_response_at",
+        "reopened_at"
+    }
+    sort_by = filters_payload.sort_by or "updated_at"
+    if sort_by not in allowed_sort_fields:
+        raise HTTPException(status_code=400, detail=f"INVALID_SORT_FIELD: {sort_by}")
+
+    limit = filters_payload.limit if "limit" in provided_fields else MAX_TICKET_EXPORT_ROWS
+    limit = min(limit or MAX_TICKET_EXPORT_ROWS, MAX_TICKET_EXPORT_ROWS)
+    offset = filters_payload.offset if "offset" in provided_fields else 0
+
+    try:
+        total, tickets = ticket_store.filter_tickets(
+            statuses=filters_payload.statuses,
+            priorities=filters_payload.priorities,
+            ticket_types=filters_payload.ticket_types,
+            assigned=filters_payload.assigned,
+            assigned_agent_ids=filters_payload.assigned_agent_ids,
+            keyword=filters_payload.keyword,
+            tags=filters_payload.tags,
+            categories=filters_payload.categories,
+            created_start=filters_payload.created_start,
+            created_end=filters_payload.created_end,
+            updated_start=filters_payload.updated_start,
+            updated_end=filters_payload.updated_end,
+            limit=limit,
+            offset=offset,
+            sort_by=sort_by,
+            sort_desc=filters_payload.sort_desc,
+            current_agent_id=agent.get("agent_id") or agent.get("username")
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if "limit" not in provided_fields and total > MAX_TICKET_EXPORT_ROWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"TOO_MANY_RECORDS: 最多导出{MAX_TICKET_EXPORT_ROWS}条，请缩小筛选范围"
+        )
+
+    csv_bytes = _tickets_to_csv_bytes(tickets)
+    filename = f"tickets_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
+
+
+@app.get("/api/tickets/{ticket_id}")
+async def get_ticket_detail(ticket_id: str, agent: Dict[str, Any] = Depends(require_agent)):
+    """获取工单详情"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    ticket = ticket_store.get(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    return {
+        "success": True,
+        "data": ticket.to_dict()
+    }
+
+
+@app.patch("/api/tickets/{ticket_id}")
+async def update_ticket_endpoint(
+    ticket_id: str,
+    request: UpdateTicketRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """更新工单信息（状态/优先级/指派）"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        ticket = ticket_store.update_ticket(
+            ticket_id,
+            status=request.status,
+            priority=request.priority,
+            assigned_agent_id=request.assigned_agent_id,
+            assigned_agent_name=request.assigned_agent_name,
+            note=request.note,
+            metadata_updates=request.metadata_updates,
+            changed_by=agent.get("agent_id") or agent.get("username") or "system",
+            change_reason=request.change_reason
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    return {
+        "success": True,
+        "data": ticket.to_dict()
+    }
+
+
+@app.post("/api/sessions/{session_name}/ticket")
+async def create_ticket_from_session(
+    session_name: str,
+    request: SessionTicketRequest = SessionTicketRequest(),
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """从会话快速创建工单并建立关联"""
+    if not session_store:
+        raise HTTPException(status_code=503, detail="SessionStore 未初始化")
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    session_state = await session_store.get(session_name)
+    if not session_state:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    last_user_message = next(
+        (msg for msg in reversed(session_state.history) if msg.role == MessageRole.USER),
+        None
+    )
+    default_description = last_user_message.content if last_user_message else "会话转工单"
+
+    assigned_agent_id = session_state.assigned_agent.id if session_state.assigned_agent else agent.get("agent_id")
+    assigned_agent_name = session_state.assigned_agent.name if session_state.assigned_agent else agent.get("username")
+
+    customer_info = TicketCustomerInfo(
+        name=session_state.user_profile.nickname,
+        email=session_state.user_profile.email,
+        country=session_state.user_profile.country
+    )
+
+    ticket = ticket_store.create_from_payload(
+        title=request.title or f"{session_state.user_profile.nickname} 的工单",
+        description=request.description or default_description,
+        created_by=agent.get("agent_id") or agent.get("username") or "system",
+        created_by_name=agent.get("username"),
+        session_name=session_state.session_name,
+        ticket_type=request.ticket_type,
+        priority=request.priority,
+        customer=customer_info.dict(),
+        assigned_agent_id=assigned_agent_id,
+        assigned_agent_name=assigned_agent_name,
+        metadata={
+            "session_name": session_state.session_name,
+            "conversation_id": session_state.conversation_id
+        }
+    )
+
+    session_state.add_ticket_reference(ticket.ticket_id)
+    await session_store.save(session_state)
+
+    return {
+        "success": True,
+        "data": {
+            "ticket": ticket.to_dict(),
+            "session": session_state.to_summary()
+        }
+    }
+
+
+@app.post("/api/tickets/{ticket_id}/assign")
+async def assign_ticket_endpoint(
+    ticket_id: str,
+    request: AssignTicketRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """分配/转派工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        ticket = ticket_store.update_ticket(
+            ticket_id,
+            assigned_agent_id=request.agent_id,
+            assigned_agent_name=request.agent_name,
+            note=request.note,
+            changed_by=agent.get("agent_id") or agent.get("username") or "system",
+            change_reason="assign"
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "ARCHIVED" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    return {
+        "success": True,
+        "data": ticket.to_dict()
+    }
+
+
+@app.post("/api/tickets/batch/assign")
+async def batch_assign_tickets_endpoint(
+    request: BatchAssignRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """批量分配工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    operator_id = agent.get("agent_id") or agent.get("username") or "system"
+
+    try:
+        result = ticket_store.batch_assign(
+            request.ticket_ids,
+            assigned_agent_id=request.target_agent_id.strip(),
+            assigned_agent_name=request.target_agent_name.strip() if request.target_agent_name else None,
+            changed_by=operator_id,
+            note=request.note
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    updated_dicts = [ticket.to_dict() for ticket in result["tickets"]]
+    for ticket in result["tickets"]:
+        try:
+            upserted = ticket.to_dict()
+        except Exception:
+            upserted = {}
+
+    return {
+        "success": True,
+        "data": {
+            "succeeded": len(result["tickets"]),
+            "failed": result["failed"],
+            "tickets": updated_dicts
+        }
+    }
+
+
+@app.post("/api/tickets/batch/close")
+async def batch_close_tickets_endpoint(
+    request: BatchCloseRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """批量关闭工单（仅支持已解决）"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    operator = agent.get("agent_id") or agent.get("username") or "system"
+
+    try:
+        result = ticket_store.batch_close(
+            request.ticket_ids,
+            reason=request.close_reason,
+            comment=request.comment,
+            changed_by=operator
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    closed_tickets = [ticket.to_dict() for ticket in result["tickets"]]
+    return {
+        "success": True,
+        "data": {
+            "succeeded": len(result["tickets"]),
+            "failed": result["failed"],
+            "tickets": closed_tickets
+        }
+    }
+
+
+@app.post("/api/tickets/batch/priority")
+async def batch_update_priority_endpoint(
+    request: BatchPriorityRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """批量调整优先级"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    operator = agent.get("agent_id") or agent.get("username") or "system"
+
+    try:
+        result = ticket_store.batch_update_priority(
+            request.ticket_ids,
+            priority=request.priority,
+            reason=request.reason,
+            changed_by=operator
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    updated_tickets = [ticket.to_dict() for ticket in result["tickets"]]
+    return {
+        "success": True,
+        "data": {
+            "succeeded": len(result["tickets"]),
+            "failed": result["failed"],
+            "tickets": updated_tickets
+        }
+    }
+
+
+@app.post("/api/tickets/{ticket_id}/comments")
+async def add_ticket_comment(
+    ticket_id: str,
+    request: TicketCommentRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """添加工单评论/内部备注"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        comment = ticket_store.add_comment(
+            ticket_id,
+            content=request.content.strip(),
+            author_id=agent.get("agent_id") or agent.get("username") or "system",
+            author_name=agent.get("username"),
+            comment_type=request.comment_type
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not comment:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    return {
+        "success": True,
+        "data": comment.dict()
+    }
+
+
+@app.get("/api/tickets/{ticket_id}/comments")
+async def list_ticket_comments(ticket_id: str, agent: Dict[str, Any] = Depends(require_agent)):
+    """获取工单评论列表"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    comments = ticket_store.list_comments(ticket_id)
+    if comments is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    return {
+        "success": True,
+        "data": [comment.dict() for comment in comments]
+    }
+
+
+@app.delete("/api/tickets/{ticket_id}/comments/{comment_id}")
+async def delete_ticket_comment(
+    ticket_id: str,
+    comment_id: str,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """删除工单评论（管理员或操作人可用，简单起见任意坐席都可删除）"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    ticket = ticket_store.get(ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if ticket.status == TicketStatus.ARCHIVED:
+        raise HTTPException(status_code=400, detail="ARCHIVED_TICKET: 归档工单不能删除评论")
+
+    success = ticket_store.delete_comment(ticket_id, comment_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="评论不存在")
+
+    return {"success": True}
+
+
+@app.post("/api/tickets/{ticket_id}/reopen")
+async def reopen_ticket_endpoint(
+    ticket_id: str,
+    request: ReopenTicketRequest,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """重开已关闭工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        ticket = ticket_store.reopen_ticket(
+            ticket_id,
+            agent_id=agent.get("agent_id") or agent.get("username") or "system",
+            reason=request.reason,
+            comment=request.comment
+        )
+        return {"success": True, "data": ticket.to_dict()}
+    except ValueError as e:
+        msg = str(e)
+        if "NOT_FOUND" in msg:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        raise HTTPException(status_code=400, detail=msg)
+
+
+@app.post("/api/tickets/{ticket_id}/archive")
+async def archive_ticket_endpoint(
+    ticket_id: str,
+    request: ArchiveTicketRequest = ArchiveTicketRequest(),
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """手动归档已关闭工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    try:
+        ticket = ticket_store.archive_ticket(
+            ticket_id,
+            agent_id=agent.get("agent_id") or agent.get("username") or "system",
+            reason=request.reason
+        )
+        return {"success": True, "data": ticket.to_dict()}
+    except ValueError as e:
+        msg = str(e)
+        if "NOT_FOUND" in msg:
+            raise HTTPException(status_code=404, detail="工单不存在")
+        raise HTTPException(status_code=400, detail=msg)
+
+
+@app.post("/api/tickets/archive/auto")
+async def auto_archive_tickets(
+    request: AutoArchiveRequest = AutoArchiveRequest(),
+    admin: Dict[str, Any] = Depends(require_admin)
+):
+    """手动触发自动归档任务"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    older_days = request.older_than_days or 30
+    seconds = older_days * 86400
+    result = ticket_store.auto_archive_closed(
+        older_than_seconds=seconds,
+        agent_id=admin.get("agent_id") or admin.get("username") or "system"
+    )
+    return {
+        "success": True,
+        "data": {
+            "archived_count": result["archived_count"],
+            "ticket_ids": result["ticket_ids"],
+            "older_than_days": older_days
+        }
+    }
+
+
+def _parse_date(date_str: Optional[str]) -> Optional[float]:
+    if not date_str:
+        return None
+    try:
+        return datetime.fromisoformat(date_str).timestamp()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {date_str}. Use ISO format YYYY-MM-DD")
+
+
+@app.get("/api/tickets/archived")
+async def get_archived_tickets(
+    customer_email: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """查询已归档工单"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    start_ts = _parse_date(start_date)
+    end_ts = _parse_date(end_date)
+
+    total, tickets = ticket_store.list_archived(
+        email=customer_email,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        limit=limit,
+        offset=offset
+    )
+    return {
+        "success": True,
+        "data": {
+            "tickets": [ticket.to_dict() for ticket in tickets],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(tickets)) < total
+        }
+    }
+
+
+@app.get("/api/tickets/sla-summary")
+async def get_ticket_sla_summary(agent: Dict[str, Any] = Depends(require_agent)):
+    """获取工单 SLA 概览"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    summary = ticket_store.get_sla_summary()
+    return {
+        "success": True,
+        "data": summary
+    }
+
+
+@app.get("/api/tickets/sla-alerts")
+async def get_ticket_sla_alerts(agent: Dict[str, Any] = Depends(require_agent)):
+    """获取 SLA 告警列表"""
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    alerts = ticket_store.detect_sla_alerts()
+    return {
+        "success": True,
+        "data": alerts
+    }
 
 
 # ====================
@@ -3310,6 +4458,56 @@ async def update_agent(
         raise HTTPException(
             status_code=500,
             detail=f"修改失败: {str(e)}"
+        )
+
+
+@app.put("/api/agents/{agent_id}/skills")
+async def update_agent_skills_endpoint(
+    agent_id: str,
+    request: UpdateAgentSkillsRequest,
+    admin: Dict[str, Any] = Depends(require_admin)
+):
+    """
+    更新坐席技能标签 (需要管理员权限)
+
+    Args:
+        agent_id: 坐席ID（兼容传入用户名）
+        request: 技能列表
+    """
+    try:
+        if not agent_manager:
+            raise HTTPException(status_code=500, detail="坐席管理系统未初始化")
+
+        agent = agent_manager.get_agent_by_id(agent_id)
+        if not agent:
+            # 兼容：允许直接传入用户名
+            agent = agent_manager.get_agent_by_username(agent_id)
+
+        if not agent:
+            raise HTTPException(
+                status_code=404,
+                detail="AGENT_NOT_FOUND: 坐席不存在"
+            )
+
+        agent.skills = request.skills
+        agent_manager.update_agent(agent)
+
+        agent_dict = agent_to_dict(agent)
+
+        print(f"✅ 更新坐席技能: {agent.username} ({len(agent.skills)} 条)")
+
+        return {
+            "success": True,
+            "agent": agent_dict
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ 更新坐席技能失败: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"更新失败: {str(e)}"
         )
 
 

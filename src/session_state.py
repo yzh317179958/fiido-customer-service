@@ -49,6 +49,7 @@ class EscalationReason(str, Enum):
 class EscalationSeverity(str, Enum):
     """问题严重程度"""
     LOW = "low"
+    MEDIUM = "medium"
     HIGH = "high"
 
 
@@ -171,6 +172,9 @@ class SessionState(BaseModel):
 
     # AI 失败计数器 (用于检测连续失败)
     ai_fail_count: int = 0
+
+    # 工单关联
+    tickets: List[str] = Field(default_factory=list)
 
     class Config:
         use_enum_values = True
@@ -311,7 +315,16 @@ class SessionState(BaseModel):
                 "urgent_keywords": self.priority.urgent_keywords
             }
 
+        if self.tickets:
+            summary["tickets"] = self.tickets
+
         return summary
+
+    def add_ticket_reference(self, ticket_id: str):
+        """关联工单 ID"""
+        if ticket_id not in self.tickets:
+            self.tickets.append(ticket_id)
+            self.updated_at = round(datetime.now(timezone.utc).timestamp(), 3)
 
 
 # ==================== 状态存储接口 ====================

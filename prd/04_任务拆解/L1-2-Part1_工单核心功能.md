@@ -1,10 +1,22 @@
 # L1-2-Part1: 工单核心功能需求
 
 > **文档编号**: L1-2-Part1
-> **文档版本**: v1.0
+> **文档版本**: v1.1
 > **优先级**: P0（基础层 - 必须实现）
-> **状态**: ❌ 待开发
+> **状态**: 🚧 开发中（MVP 已落地）
 > **创建时间**: 2025-01-27
+> **最后更新**: 2025-11-25
+
+> **最新进度同步（2025-11-25）**
+> - ✅ 完成工单状态历史、重开与手动归档 API（/api/tickets/{id}/reopen、/archive）
+> - ✅ 已记录 SLA 关键时间点：`first_response_at`、`resolved_at`
+> - ✅ 支持从会话一键创建工单并写回会话引用（/api/sessions/{session_name}/ticket）
+> - ✅ 新增 `/api/tickets/manual`，支持手动创建工单
+> - ✅ 新增 `/api/tickets/{id}/assign`，支持坐席分配/转派
+> - ✅ 提供 `/api/tickets/archive/auto` 用于触发自动归档（30 天以上的关闭工单）
+> - ✅ 提供 `/api/tickets/archived` 查询接口（按邮箱/日期过滤归档工单）
+> - ✅ 新增 `/api/tickets/sla-summary` + `/api/tickets/sla-alerts`，输出 SLA 概览与超时告警
+> - ⏳ SLA 可视化面板仍在规划
 
 ---
 

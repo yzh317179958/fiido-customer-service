@@ -16,8 +16,8 @@ import jwt
 import bcrypt
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
 
@@ -41,6 +41,52 @@ class AgentStatus(str, Enum):
     OFFLINE = "offline"    # 离线
 
 
+class AgentSkillLevel(str, Enum):
+    """坐席技能熟练度"""
+    JUNIOR = "junior"
+    INTERMEDIATE = "intermediate"
+    SENIOR = "senior"
+
+
+class AgentSkill(BaseModel):
+    """坐席技能标签"""
+    category: str = Field(..., min_length=1, max_length=50, description="技能分类")
+    level: AgentSkillLevel = AgentSkillLevel.JUNIOR
+    tags: List[str] = Field(default_factory=list, description="技能关键词标签")
+
+    @field_validator("category")
+    @classmethod
+    def normalize_category(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("技能分类不能为空")
+        return normalized
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def ensure_list(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: List[str]) -> List[str]:
+        normalized: List[str] = []
+        seen = set()
+        for tag in value:
+            tag_str = str(tag).strip().lower()
+            if not tag_str:
+                continue
+            if tag_str in seen:
+                continue
+            normalized.append(tag_str)
+            seen.add(tag_str)
+        return normalized
+
+
 class Agent(BaseModel):
     """坐席账号模型"""
     id: str
@@ -56,6 +102,7 @@ class Agent(BaseModel):
     created_at: float = Field(default_factory=time.time)
     last_login: Optional[float] = None
     avatar_url: Optional[str] = None
+    skills: List[AgentSkill] = Field(default_factory=list, description="技能标签")
 
 
 class LoginRequest(BaseModel):
@@ -240,6 +287,20 @@ class AgentManager:
         """
         self.redis = redis_store.redis
         self.key_prefix = "agent:"
+        self.id_index_prefix = "agent_id:"
+        self.default_ttl = 86400 * 365  # 1年
+
+    def _username_key(self, username: str) -> str:
+        return f"{self.key_prefix}{username}"
+
+    def _id_index_key(self, agent_id: str) -> str:
+        return f"{self.id_index_prefix}{agent_id}"
+
+    def _store_agent_record(self, agent: Agent):
+        """将坐席信息写入Redis并刷新索引"""
+        data = agent.json()
+        self.redis.set(self._username_key(agent.username), data, ex=self.default_ttl)
+        self.redis.set(self._id_index_key(agent.id), agent.username, ex=self.default_ttl)
 
     def create_agent(
         self,
@@ -279,8 +340,7 @@ class AgentManager:
         )
 
         # 保存到 Redis
-        key = f"{self.key_prefix}{username}"
-        self.redis.set(key, agent.json(), ex=86400 * 365)  # 1年过期
+        self._store_agent_record(agent)
 
         return agent
 
@@ -294,11 +354,38 @@ class AgentManager:
         Returns:
             坐席账号或 None
         """
-        key = f"{self.key_prefix}{username}"
+        key = self._username_key(username)
         data = self.redis.get(key)
 
         if data:
             return Agent.parse_raw(data)
+        return None
+
+    def get_agent_by_id(self, agent_id: str) -> Optional[Agent]:
+        """
+        根据坐席ID获取账号
+
+        Args:
+            agent_id: 坐席ID
+        """
+        username = self.redis.get(self._id_index_key(agent_id))
+        if username:
+            if isinstance(username, bytes):
+                username = username.decode("utf-8")
+            return self.get_agent_by_username(username)
+
+        # 兼容旧数据：扫描所有坐席
+        for key in self.redis.scan_iter(f"{self.key_prefix}*", count=100):
+            data = self.redis.get(key)
+            if not data:
+                continue
+            try:
+                agent = Agent.parse_raw(data)
+            except Exception:
+                continue
+            if agent.id == agent_id:
+                self.redis.set(self._id_index_key(agent_id), agent.username, ex=self.default_ttl)
+                return agent
         return None
 
     def update_agent(self, agent: Agent):
@@ -308,8 +395,7 @@ class AgentManager:
         Args:
             agent: 坐席账号
         """
-        key = f"{self.key_prefix}{agent.username}"
-        self.redis.set(key, agent.json(), ex=86400 * 365)
+        self._store_agent_record(agent)
 
     def authenticate(self, username: str, password: str) -> Optional[Agent]:
         """
@@ -413,8 +499,11 @@ class AgentManager:
         Returns:
             是否删除成功
         """
-        key = f"{self.key_prefix}{username}"
+        key = self._username_key(username)
+        agent = self.get_agent_by_username(username)
         result = self.redis.delete(key)
+        if agent:
+            self.redis.delete(self._id_index_key(agent.id))
         return result > 0
 
     def count_admins(self) -> int:
@@ -611,6 +700,18 @@ class UpdateProfileRequest(BaseModel):
     """修改个人资料请求"""
     name: Optional[str] = Field(None, min_length=1, max_length=50)
     avatar_url: Optional[str] = None
+
+
+class UpdateAgentSkillsRequest(BaseModel):
+    """更新坐席技能请求"""
+    skills: List[AgentSkill] = Field(default_factory=list, description="技能标签列表")
+
+    @field_validator("skills")
+    @classmethod
+    def validate_total(cls, value: List[AgentSkill]) -> List[AgentSkill]:
+        if len(value) > 20:
+            raise ValueError("每个坐席最多配置20条技能记录")
+        return value
 
 
 def validate_password(password: str) -> bool:
