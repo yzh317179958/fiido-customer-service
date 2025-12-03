@@ -3854,6 +3854,94 @@ async def export_tickets_endpoint(
     )
 
 
+@app.get("/api/tickets/sla-dashboard")
+async def get_sla_dashboard(
+    agent: Dict[str, Any] = Depends(require_agent)
+):
+    """
+    获取 SLA 仪表盘数据
+
+    返回:
+    - 所有未完成工单的 SLA 状态统计
+    - 告警列表（按紧急程度排序）
+    - 平均首次响应时间
+    - 平均解决时间
+    """
+    if not ticket_store:
+        raise HTTPException(status_code=503, detail="工单系统未初始化")
+
+    # 获取所有未完成的工单
+    _, tickets = ticket_store.filter_tickets(
+        statuses=[
+            TicketStatus.PENDING,
+            TicketStatus.IN_PROGRESS,
+            TicketStatus.WAITING_CUSTOMER,
+            TicketStatus.WAITING_VENDOR,
+        ],
+        limit=200
+    )
+
+    # 统计 SLA 状态
+    frt_stats = {"normal": 0, "warning": 0, "urgent": 0, "violated": 0, "completed": 0}
+    rt_stats = {"normal": 0, "warning": 0, "urgent": 0, "violated": 0, "completed": 0}
+    alerts = []
+    now = time.time()
+
+    for ticket in tickets:
+        timer = SLATimer(ticket)
+        sla_info = timer.get_sla_info(now)
+
+        # 统计首次响应状态
+        frt_status = sla_info.frt_status.value
+        if frt_status in frt_stats:
+            frt_stats[frt_status] += 1
+
+        # 统计解决时效状态
+        rt_status = sla_info.rt_status.value
+        if rt_status in rt_stats:
+            rt_stats[rt_status] += 1
+
+        # 收集告警
+        should_alert = timer.should_alert(now)
+        if should_alert["frt_alert"] or should_alert["rt_alert"]:
+            alerts.append({
+                "ticket_id": ticket.ticket_id,
+                "title": ticket.title,
+                "priority": ticket.priority.value,
+                "status": ticket.status.value,
+                "frt_alert": should_alert["frt_alert"],
+                "frt_remaining_minutes": round(sla_info.frt_remaining_seconds / 60, 1),
+                "frt_status": sla_info.frt_status.value,
+                "rt_alert": should_alert["rt_alert"],
+                "rt_remaining_hours": round(sla_info.rt_remaining_seconds / 3600, 2),
+                "rt_status": sla_info.rt_status.value,
+                "assigned_agent_name": ticket.assigned_agent_name,
+            })
+
+    # 按紧急程度排序（先显示 violated，再 urgent）
+    priority_order = {"violated": 0, "urgent": 1, "warning": 2, "normal": 3, "completed": 4}
+    alerts.sort(key=lambda x: (
+        priority_order.get(x.get("rt_status", "normal"), 3),
+        priority_order.get(x.get("frt_status", "normal"), 3),
+        x.get("rt_remaining_hours", 999)
+    ))
+
+    # 获取 SLA 概览统计
+    summary = ticket_store.get_sla_summary()
+
+    return {
+        "success": True,
+        "data": {
+            "total_open_tickets": len(tickets),
+            "frt_stats": frt_stats,
+            "rt_stats": rt_stats,
+            "alerts": alerts[:50],  # 最多返回50个告警
+            "alerts_count": len(alerts),
+            "summary": summary
+        }
+    }
+
+
 @app.get("/api/tickets/{ticket_id}")
 async def get_ticket_detail(ticket_id: str, agent: Dict[str, Any] = Depends(require_agent)):
     """获取工单详情"""
@@ -4725,94 +4813,6 @@ async def get_ticket_sla_info(
             "ticket_type": ticket.ticket_type.value,
             "status": ticket.status.value,
             "sla": sla_info
-        }
-    }
-
-
-@app.get("/api/tickets/sla-dashboard")
-async def get_sla_dashboard(
-    agent: Dict[str, Any] = Depends(require_agent)
-):
-    """
-    获取 SLA 仪表盘数据
-
-    返回:
-    - 所有未完成工单的 SLA 状态统计
-    - 告警列表（按紧急程度排序）
-    - 平均首次响应时间
-    - 平均解决时间
-    """
-    if not ticket_store:
-        raise HTTPException(status_code=503, detail="工单系统未初始化")
-
-    # 获取所有未完成的工单
-    _, tickets = ticket_store.filter_tickets(
-        statuses=[
-            TicketStatus.PENDING,
-            TicketStatus.IN_PROGRESS,
-            TicketStatus.WAITING_CUSTOMER,
-            TicketStatus.WAITING_VENDOR,
-        ],
-        limit=200
-    )
-
-    # 统计 SLA 状态
-    frt_stats = {"normal": 0, "warning": 0, "urgent": 0, "violated": 0, "completed": 0}
-    rt_stats = {"normal": 0, "warning": 0, "urgent": 0, "violated": 0, "completed": 0}
-    alerts = []
-    now = time.time()
-
-    for ticket in tickets:
-        timer = SLATimer(ticket)
-        sla_info = timer.get_sla_info(now)
-
-        # 统计首次响应状态
-        frt_status = sla_info.frt_status.value
-        if frt_status in frt_stats:
-            frt_stats[frt_status] += 1
-
-        # 统计解决时效状态
-        rt_status = sla_info.rt_status.value
-        if rt_status in rt_stats:
-            rt_stats[rt_status] += 1
-
-        # 收集告警
-        should_alert = timer.should_alert(now)
-        if should_alert["frt_alert"] or should_alert["rt_alert"]:
-            alerts.append({
-                "ticket_id": ticket.ticket_id,
-                "title": ticket.title,
-                "priority": ticket.priority.value,
-                "status": ticket.status.value,
-                "frt_alert": should_alert["frt_alert"],
-                "frt_remaining_minutes": round(sla_info.frt_remaining_seconds / 60, 1),
-                "frt_status": sla_info.frt_status.value,
-                "rt_alert": should_alert["rt_alert"],
-                "rt_remaining_hours": round(sla_info.rt_remaining_seconds / 3600, 2),
-                "rt_status": sla_info.rt_status.value,
-                "assigned_agent_name": ticket.assigned_agent_name,
-            })
-
-    # 按紧急程度排序（先显示 violated，再 urgent）
-    priority_order = {"violated": 0, "urgent": 1, "warning": 2, "normal": 3, "completed": 4}
-    alerts.sort(key=lambda x: (
-        priority_order.get(x.get("rt_status", "normal"), 3),
-        priority_order.get(x.get("frt_status", "normal"), 3),
-        x.get("rt_remaining_hours", 999)
-    ))
-
-    # 获取 SLA 概览统计
-    summary = ticket_store.get_sla_summary()
-
-    return {
-        "success": True,
-        "data": {
-            "total_open_tickets": len(tickets),
-            "frt_stats": frt_stats,
-            "rt_stats": rt_stats,
-            "alerts": alerts[:50],  # 最多返回50个告警
-            "alerts_count": len(alerts),
-            "summary": summary
         }
     }
 
