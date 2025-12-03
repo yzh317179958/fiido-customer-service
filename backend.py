@@ -789,6 +789,11 @@ def _auto_adjust_agent_status(agent_obj: Agent) -> Agent:
 SLA_CHECK_INTERVAL = int(os.getenv("SLA_CHECK_INTERVAL", "60"))  # 默认60秒检查一次
 _sla_task: Optional[asyncio.Task] = None  # 后台任务引用
 
+# 【心跳超时自动离线】配置
+AGENT_OFFLINE_THRESHOLD = int(os.getenv("AGENT_OFFLINE_THRESHOLD", "30"))  # 默认30秒无心跳自动离线
+AGENT_CHECK_INTERVAL = int(os.getenv("AGENT_CHECK_INTERVAL", "10"))  # 默认10秒检查一次
+_agent_heartbeat_task: Optional[asyncio.Task] = None  # 后台任务引用
+
 
 async def sla_alert_background_task():
     """
@@ -862,10 +867,56 @@ async def sla_alert_background_task():
             await asyncio.sleep(5)  # 出错后短暂等待再重试
 
 
+async def agent_heartbeat_monitor_task():
+    """
+    坐席心跳监控后台任务
+
+    定期检查所有坐席的心跳超时情况，自动设置离线
+    配置：
+    - AGENT_OFFLINE_THRESHOLD: 心跳超时阈值（秒），默认30秒
+    - AGENT_CHECK_INTERVAL: 检查间隔（秒），默认10秒
+    """
+    global agent_manager
+
+    print(f"💓 坐席心跳监控启动 (超时阈值: {AGENT_OFFLINE_THRESHOLD}秒, 检查间隔: {AGENT_CHECK_INTERVAL}秒)")
+
+    while True:
+        try:
+            await asyncio.sleep(AGENT_CHECK_INTERVAL)
+
+            if not agent_manager:
+                continue
+
+            current_time = time.time()
+
+            # 遍历所有坐席，检查心跳超时
+            for agent in agent_manager.get_all_agents():
+                # 只检查在线或忙碌状态的坐席
+                if agent.status in {AgentStatus.ONLINE, AgentStatus.BUSY}:
+                    idle_seconds = current_time - agent.last_active_at
+
+                    if idle_seconds > AGENT_OFFLINE_THRESHOLD:
+                        print(f"⚠️ 坐席【{agent.name}】({agent.username}) 心跳超时 ({idle_seconds:.0f}秒)，自动设为离线")
+                        agent_manager.update_status(
+                            agent.username,
+                            AgentStatus.OFFLINE,
+                            f"心跳超时（{int(idle_seconds)}秒无活动）"
+                        )
+
+        except asyncio.CancelledError:
+            print("💓 坐席心跳监控已停止")
+            break
+        except Exception as e:
+            print(f"❌ 坐席心跳监控异常: {e}")
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(5)  # 出错后短暂等待再重试
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, quick_reply_store, variable_replacer, ticket_store, smart_assignment_engine, audit_log_store, ticket_template_store, WORKFLOW_ID, APP_ID, AUTH_MODE, _sla_task, customer_reply_auto_reopen
+    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, quick_reply_store, variable_replacer, ticket_store, smart_assignment_engine, audit_log_store, ticket_template_store, WORKFLOW_ID, APP_ID, AUTH_MODE, _sla_task, _agent_heartbeat_task, customer_reply_auto_reopen
 
     # 读取配置
     WORKFLOW_ID = os.getenv("COZE_WORKFLOW_ID", "")
@@ -1097,8 +1148,11 @@ async def lifespan(app: FastAPI):
     print(f"{'=' * 60}\n")
 
     # 【增量3-4】启动 SLA 预警后台任务
-    global _sla_task
+    global _sla_task, _agent_heartbeat_task
     _sla_task = asyncio.create_task(sla_alert_background_task())
+
+    # 【心跳超时自动离线】启动坐席心跳监控任务
+    _agent_heartbeat_task = asyncio.create_task(agent_heartbeat_monitor_task())
 
     yield
 
@@ -1109,6 +1163,14 @@ async def lifespan(app: FastAPI):
             await _sla_task
         except asyncio.CancelledError:
             pass
+
+    if _agent_heartbeat_task:
+        _agent_heartbeat_task.cancel()
+        try:
+            await _agent_heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
     print("👋 关闭 Coze 客户端")
 
 
