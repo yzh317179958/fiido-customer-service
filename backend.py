@@ -84,6 +84,7 @@ from src.ticket_store import TicketStore
 from src.audit_log import AuditLogStore
 from src.ticket_assignment import SmartAssignmentEngine
 from src.ticket_template import TicketTemplateStore, TicketTemplate
+from src.automation_rules import CustomerReplyAutoReopen
 
 # 【增量3-1】导入 SLA 计时器模块
 from src.sla_timer import SLATimer, calculate_ticket_sla, SLAStatus
@@ -408,6 +409,7 @@ quick_reply_store: Optional['QuickReplyStore'] = None  # 快捷回复存储管�
 variable_replacer: Optional['VariableReplacer'] = None  # 变量替换器（模块3）
 ticket_store: Optional['TicketStore'] = None  # 工单系统存储（L1-2）
 smart_assignment_engine: Optional['SmartAssignmentEngine'] = None  # 智能分配引擎
+customer_reply_auto_reopen: Optional['CustomerReplyAutoReopen'] = None  # 客户回复自动恢复规则
 WORKFLOW_ID: str = ""
 APP_ID: str = ""  # AI 应用 ID（应用中嵌入对话流时必需）
 AUTH_MODE: str = ""  # 鉴权模式：OAUTH_JWT 或 PAT
@@ -512,6 +514,41 @@ async def enqueue_sse_message(target: str, payload: dict):
         except asyncio.QueueEmpty:
             pass
         queue.put_nowait(payload)
+
+
+async def handle_customer_reply_event(session_state: SessionState, source: str):
+    """
+    当会话产生客户回复时，触发自动恢复规则
+    """
+    global customer_reply_auto_reopen
+    if not customer_reply_auto_reopen or not session_state:
+        return
+
+    try:
+        updated_tickets = await customer_reply_auto_reopen.handle_reply(
+            session_state,
+            notify_callback=enqueue_sse_message
+        )
+    except Exception as exc:
+        print(f"⚠️ 客户回复自动恢复执行失败: {exc}")
+        return
+
+    if not updated_tickets:
+        return
+
+    for ticket in updated_tickets:
+        log_ticket_event(
+            "status_changed",
+            ticket.ticket_id,
+            operator=None,
+            details={
+                "from_status": TicketStatus.WAITING_CUSTOMER.value,
+                "to_status": TicketStatus.IN_PROGRESS.value,
+                "trigger": "customer_reply",
+                "source": source,
+            }
+        )
+        print(f"🔄 客户回复自动恢复工单: {ticket.ticket_id} (source={source})")
 
 
 def _resolve_attachment_rule(filename: str, content_type: Optional[str]):
@@ -828,7 +865,7 @@ async def sla_alert_background_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, quick_reply_store, variable_replacer, ticket_store, smart_assignment_engine, audit_log_store, ticket_template_store, WORKFLOW_ID, APP_ID, AUTH_MODE, _sla_task
+    global coze_client, token_manager, jwt_oauth_app, session_store, regulator, agent_manager, agent_token_manager, quick_reply_store, variable_replacer, ticket_store, smart_assignment_engine, audit_log_store, ticket_template_store, WORKFLOW_ID, APP_ID, AUTH_MODE, _sla_task, customer_reply_auto_reopen
 
     # 读取配置
     WORKFLOW_ID = os.getenv("COZE_WORKFLOW_ID", "")
@@ -1005,6 +1042,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         ticket_store = TicketStore()
         print(f"⚠️  工单系统初始化失败，回退到内存存储: {str(e)}")
+    finally:
+        if ticket_store:
+            if customer_reply_auto_reopen:
+                customer_reply_auto_reopen.update_dependencies(
+                    ticket_store=ticket_store,
+                    agent_manager=agent_manager
+                )
+            else:
+                customer_reply_auto_reopen = CustomerReplyAutoReopen(
+                    ticket_store,
+                    agent_manager=agent_manager
+                )
 
     # 初始化协作日志存储
     try:
@@ -1747,6 +1796,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
                 # 保存会话状态
                 await session_store.save(session_state)
+                await handle_customer_reply_event(session_state, source="chat")
 
             except Exception as regulator_error:
                 # ⚠️ 监管逻辑失败不应影响核心对话功能
@@ -2024,6 +2074,7 @@ async def chat_stream(request: ChatRequest):
 
                     # 保存会话状态
                     await session_store.save(session_state)
+                    await handle_customer_reply_event(session_state, source="chat_stream")
 
                 except Exception as regulator_error:
                     # ⚠️ 监管逻辑失败不应影响核心对话功能
@@ -2796,6 +2847,9 @@ async def manual_message(request: dict):
             })
             print(f"✅ SSE 推送人工消息到队列: {session_name}, role={role}")
 
+        if role == "user":
+            await handle_customer_reply_event(session_state, source="manual_message")
+
         return {
             "success": True,
             "data": {
@@ -2958,18 +3012,24 @@ async def takeover_session(
                 )
 
         # 如果已经由智能分配锁定坐席，禁止其他坐席抢单
-        if session_state.assigned_agent and session_state.assigned_agent.id != agent_id:
-            raise HTTPException(
-                status_code=409,
-                detail=f"ASSIGNED_TO_OTHER: 会话已分配给坐席【{session_state.assigned_agent.name}】"
+        if session_state.assigned_agent:
+            # 检查是否是被分配的坐席本人
+            if session_state.assigned_agent.id == agent_id:
+                # 是被分配的坐席，允许接入，不需要重新赋值
+                print(f"✅ 坐席【{agent_name}】接入被分配的会话: {session_name}")
+            else:
+                # 是其他坐席，禁止抢单
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"ASSIGNED_TO_OTHER: 会话已分配给坐席【{session_state.assigned_agent.name}】"
+                )
+        else:
+            # 未分配坐席，执行分配
+            from src.session_state import AgentInfo
+            session_state.assigned_agent = AgentInfo(
+                id=agent_id,
+                name=agent_name
             )
-
-        # 🔴 P0-2.3: 分配坐席
-        from src.session_state import AgentInfo
-        session_state.assigned_agent = AgentInfo(
-            id=agent_id,
-            name=agent_name
-        )
 
         # 🔴 P0-2.4: 状态转换为manual_live
         success = session_state.transition_status(
@@ -3218,20 +3278,24 @@ async def get_sessions(
         # 🔴 L1-1-Part1-F1-3: 坐席筛选
         if agent and agent != 'all':
             if agent == 'unassigned':
-                # 显示 pending_manual 状态的会话
-                sessions = [s for s in sessions if s.status == SessionStatus.PENDING_MANUAL]
+                # 显示 pending_manual 状态且未分配坐席的会话（真正的未分配会话）
+                sessions = [
+                    s for s in sessions
+                    if s.status == SessionStatus.PENDING_MANUAL and not s.assigned_agent
+                ]
             elif agent == 'mine':
                 if not current_agent_id:
                     raise HTTPException(
                         status_code=401,
                         detail="无法识别当前坐席，token 可能已失效"
                     )
+                # 显示分配给当前坐席的会话（包括pending_manual和manual_live状态）
                 sessions = [
                     s for s in sessions
                     if s.assigned_agent and s.assigned_agent.id == current_agent_id
                 ]
             else:
-                # 指定坐席
+                # 指定坐席：显示分配给该坐席的会话
                 sessions = [
                     s for s in sessions
                     if s.assigned_agent and s.assigned_agent.id == agent
